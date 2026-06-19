@@ -1,0 +1,1 @@
+"""Calibration GUI view scaffold."""

@@ -1,0 +1,1 @@
+"""Preprocess GUI view scaffold."""

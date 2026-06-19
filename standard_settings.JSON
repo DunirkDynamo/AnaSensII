@@ -1,0 +1,19 @@
+{
+  "preprocess": {
+    "cut_start_points": 10,
+    "cut_end_points": 5,
+    "smooth_window_length": 19,
+    "smooth_polyorder": 3,
+    "baseline": {
+      "snip": {
+        "baseline_expected_fwhm": 35,
+        "baseline_window_size": 10
+      },
+      "moving_average": {
+        "window_size": 5,
+        "forward": true,
+        "max_iter": 2000
+      }
+    }
+  }
+}

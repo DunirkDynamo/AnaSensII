@@ -1,0 +1,206 @@
+{
+  "source_file": "C:\\Users\\jacgw\\OneDrive\\Documents\\Professional\\AnaSens\\AnaSens Data\\1. Anasens Tablet Format\\25MR07NR\\2503_4_4-2025-02-03_20.59.05.59\\2503_4_4-2025-02-03_20.59.05.59-Control-36s-RAW.pssession",
+  "source_name": "2503_4_4-2025-02-03_20.59.05.59-Control-36s-RAW.pssession",
+  "key_path_count": 88,
+  "key_paths": [
+    "coreversion",
+    "measurements",
+    "measurements[]",
+    "measurements[].curves",
+    "measurements[].curves[]",
+    "measurements[].curves[].appearance",
+    "measurements[].curves[].appearance.autoassigncolor",
+    "measurements[].curves[].appearance.color",
+    "measurements[].curves[].appearance.linewidth",
+    "measurements[].curves[].appearance.noline",
+    "measurements[].curves[].appearance.symbolfill",
+    "measurements[].curves[].appearance.symbolsize",
+    "measurements[].curves[].appearance.symboltype",
+    "measurements[].curves[].appearance.type",
+    "measurements[].curves[].corrosionbutlervolmer",
+    "measurements[].curves[].corrosionbutlervolmer[]",
+    "measurements[].curves[].corrosiontafel",
+    "measurements[].curves[].corrosiontafel[]",
+    "measurements[].curves[].hash",
+    "measurements[].curves[].hash[]",
+    "measurements[].curves[].meastype",
+    "measurements[].curves[].title",
+    "measurements[].curves[].type",
+    "measurements[].curves[].xaxis",
+    "measurements[].curves[].xaxisdataarray",
+    "measurements[].curves[].xaxisdataarray.arraytype",
+    "measurements[].curves[].xaxisdataarray.datavalues",
+    "measurements[].curves[].xaxisdataarray.datavalues[]",
+    "measurements[].curves[].xaxisdataarray.datavalues[].r",
+    "measurements[].curves[].xaxisdataarray.datavalues[].s",
+    "measurements[].curves[].xaxisdataarray.datavalues[].v",
+    "measurements[].curves[].xaxisdataarray.datavaluetype",
+    "measurements[].curves[].xaxisdataarray.description",
+    "measurements[].curves[].xaxisdataarray.type",
+    "measurements[].curves[].xaxisdataarray.unit",
+    "measurements[].curves[].xaxisdataarray.unit.a",
+    "measurements[].curves[].xaxisdataarray.unit.q",
+    "measurements[].curves[].xaxisdataarray.unit.s",
+    "measurements[].curves[].xaxisdataarray.unit.type",
+    "measurements[].curves[].yaxis",
+    "measurements[].curves[].yaxisdataarray",
+    "measurements[].curves[].yaxisdataarray.arraytype",
+    "measurements[].curves[].yaxisdataarray.datavalues",
+    "measurements[].curves[].yaxisdataarray.datavalues[]",
+    "measurements[].curves[].yaxisdataarray.datavalues[].c",
+    "measurements[].curves[].yaxisdataarray.datavalues[].s",
+    "measurements[].curves[].yaxisdataarray.datavalues[].t",
+    "measurements[].curves[].yaxisdataarray.datavalues[].v",
+    "measurements[].curves[].yaxisdataarray.datavaluetype",
+    "measurements[].curves[].yaxisdataarray.description",
+    "measurements[].curves[].yaxisdataarray.type",
+    "measurements[].curves[].yaxisdataarray.unit",
+    "measurements[].curves[].yaxisdataarray.unit.a",
+    "measurements[].curves[].yaxisdataarray.unit.q",
+    "measurements[].curves[].yaxisdataarray.unit.s",
+    "measurements[].curves[].yaxisdataarray.unit.type",
+    "measurements[].dataset",
+    "measurements[].dataset.type",
+    "measurements[].dataset.values",
+    "measurements[].dataset.values[]",
+    "measurements[].dataset.values[].arraytype",
+    "measurements[].dataset.values[].datavalues",
+    "measurements[].dataset.values[].datavalues[]",
+    "measurements[].dataset.values[].datavalues[].c",
+    "measurements[].dataset.values[].datavalues[].r",
+    "measurements[].dataset.values[].datavalues[].s",
+    "measurements[].dataset.values[].datavalues[].t",
+    "measurements[].dataset.values[].datavalues[].v",
+    "measurements[].dataset.values[].datavaluetype",
+    "measurements[].dataset.values[].description",
+    "measurements[].dataset.values[].type",
+    "measurements[].dataset.values[].unit",
+    "measurements[].dataset.values[].unit.a",
+    "measurements[].dataset.values[].unit.q",
+    "measurements[].dataset.values[].unit.s",
+    "measurements[].dataset.values[].unit.type",
+    "measurements[].devicefw",
+    "measurements[].deviceserial",
+    "measurements[].deviceused",
+    "measurements[].eisdatalist",
+    "measurements[].eisdatalist[]",
+    "measurements[].method",
+    "measurements[].timestamp",
+    "measurements[].title",
+    "measurements[].type",
+    "measurements[].utctimestamp",
+    "methodformeasurement",
+    "type"
+  ],
+  "key_tree": {
+    "type": null,
+    "coreversion": null,
+    "methodformeasurement": null,
+    "measurements": [
+      {
+        "utctimestamp": null,
+        "eisdatalist": [],
+        "dataset": {
+          "type": null,
+          "values": [
+            {
+              "arraytype": null,
+              "datavaluetype": null,
+              "type": null,
+              "description": null,
+              "datavalues": [
+                {
+                  "v": null,
+                  "s": null,
+                  "t": null,
+                  "c": null,
+                  "r": null
+                }
+              ],
+              "unit": {
+                "type": null,
+                "s": null,
+                "q": null,
+                "a": null
+              }
+            }
+          ]
+        },
+        "curves": [
+          {
+            "type": null,
+            "corrosiontafel": [
+              null
+            ],
+            "xaxis": null,
+            "corrosionbutlervolmer": [
+              null
+            ],
+            "meastype": null,
+            "yaxisdataarray": {
+              "arraytype": null,
+              "datavaluetype": null,
+              "type": null,
+              "description": null,
+              "datavalues": [
+                {
+                  "c": null,
+                  "t": null,
+                  "v": null,
+                  "s": null
+                }
+              ],
+              "unit": {
+                "type": null,
+                "s": null,
+                "q": null,
+                "a": null
+              }
+            },
+            "hash": [
+              null
+            ],
+            "yaxis": null,
+            "xaxisdataarray": {
+              "arraytype": null,
+              "datavaluetype": null,
+              "type": null,
+              "description": null,
+              "datavalues": [
+                {
+                  "r": null,
+                  "v": null,
+                  "s": null
+                }
+              ],
+              "unit": {
+                "type": null,
+                "s": null,
+                "q": null,
+                "a": null
+              }
+            },
+            "title": null,
+            "appearance": {
+              "autoassigncolor": null,
+              "linewidth": null,
+              "noline": null,
+              "symbolsize": null,
+              "symboltype": null,
+              "type": null,
+              "symbolfill": null,
+              "color": null
+            }
+          }
+        ],
+        "deviceserial": null,
+        "method": null,
+        "timestamp": null,
+        "deviceused": null,
+        "type": null,
+        "title": null,
+        "devicefw": null
+      }
+    ]
+  }
+}
