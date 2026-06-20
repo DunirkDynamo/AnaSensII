@@ -1,4 +1,19 @@
-"""Internal subprocess entrypoint for GUI-triggered pipeline execution."""
+"""Internal subprocess entrypoint for GUI-triggered pipeline execution.
+
+The Qt GUI shell (:class:`~anasens.interfaces.gui_app.AnaSensWindow`)
+spawns this module as a separate process so the analysis work runs
+out-of-process and cannot block the event loop.  All parameters are
+passed via command-line arguments; progress updates are printed to
+stdout and read back by the GUI's ``QProcess`` connection.
+
+Usage (invoked internally by the GUI, not by end users)::
+
+    python -m anasens.interfaces.pipeline_launcher \\
+        --input-folder /data/session.json \\
+        --input-source json \\
+        --analysis-mode single \\
+        --smooth-window-length 21
+"""
 
 from __future__ import annotations
 
@@ -10,35 +25,69 @@ from anasens.pipeline.runner import run_pipeline  # noqa: F401 – re-exported f
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser for pipeline subprocess invocation.
+
+    Returns:
+        argparse.ArgumentParser: Configured parser with all pipeline
+        parameters exposed as ``--flag`` arguments.
+    """
     parser = argparse.ArgumentParser(description="Run native analysis pipeline from GUI request.")
-    parser.add_argument("--input-folder", required=True)
-    parser.add_argument("--analysis-mode", choices=["single", "batch"], required=True)
+
+    # ── Input configuration ─────────────────────────────────────────────────
+    parser.add_argument("--input-folder", required=True,
+                        help="Path to input file or directory.")
+    parser.add_argument("--input-source", choices=["legacy_csv", "json", "pssession"],
+                        default="legacy_csv",
+                        help="Data source format selector.")
+    parser.add_argument("--analysis-mode", choices=["single", "batch"], required=True,
+                        help="Single-measurement or batch-folder mode.")
+
+    # ── Cut stage ────────────────────────────────────────────────────────────
+    # --cutoff-points is the legacy single-sided cut argument kept for
+    # backward compatibility; --cut-start-points takes precedence when set.
     parser.add_argument("--cutoff-points", type=int, default=0)
     parser.add_argument("--cut-start-points", type=int, default=None)
     parser.add_argument("--cut-end-points", type=int, default=0)
+
+    # ── Smoothing stage ───────────────────────────────────────────────────
     parser.add_argument("--smooth-window-length", type=int, default=17)
     parser.add_argument("--smooth-polyorder", type=int, default=3)
+
+    # ── Baseline stage ───────────────────────────────────────────────────
     parser.add_argument("--baseline-algo", choices=["snip", "moving_average"], default="snip")
     parser.add_argument("--baseline-snip-expected-fwhm", type=int, default=35)
     parser.add_argument("--baseline-snip-window-size", type=int, default=10)
     parser.add_argument("--baseline-moving-average-window-size", type=int, default=10)
-    parser.add_argument("--baseline-moving-average-forward", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--baseline-moving-average-forward",
+                        action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--baseline-moving-average-max-iter", type=int, default=1000)
+
+    # ── Visualization flags ───────────────────────────────────────────────
     parser.add_argument("--pairplot", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--drift-2d", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--drift-1d", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--overlay-scans", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--preprocessing-overview", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
 
 def main() -> None:
+    """Parse CLI arguments, build :class:`~anasens.config.PipelineConfig`, and run the pipeline.
+
+    This function is the ``__main__`` entry point when the module is
+    executed as a subprocess by the GUI shell.
+    """
     args = _build_parser().parse_args()
+
+    # Resolve cut_start: prefer the explicit flag; fall back to legacy cutoff.
     cut_start = args.cut_start_points
     if cut_start is None:
         cut_start = args.cutoff_points
 
+    # Assemble the typed configuration object from parsed CLI arguments.
     config = PipelineConfig(
         input_path=Path(args.input_folder),
+        input_source=str(args.input_source),
         analysis_mode=args.analysis_mode,
         preprocess=PreprocessConfig(
             cut_start_points=max(0, int(cut_start)),
@@ -57,6 +106,7 @@ def main() -> None:
             drift_2d=bool(args.drift_2d),
             drift_1d=bool(args.drift_1d),
             overlay_scans=bool(args.overlay_scans),
+            preprocessing_overview=bool(args.preprocessing_overview),
         ),
     )
     run_pipeline(config=config)

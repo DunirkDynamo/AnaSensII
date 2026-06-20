@@ -1,4 +1,19 @@
-"""Pipeline tab for the AnaSens2 Qt GUI."""
+"""Pipeline tab widget for the AnaSens2 Qt GUI.
+
+This module provides the user-facing controls for configuring and
+launching the native analysis pipeline.  It is intentionally separated
+from the actual pipeline logic so the GUI can remain responsive while
+analysis runs in a subprocess.
+
+Workflow from the user's perspective:
+1. Select an input path and source format.
+2. Choose single or batch mode.
+3. Optionally configure preprocessing via dialog or JSON preset.
+4. Choose which visualizations to render.
+5. Click **Run Full Pipeline** → :attr:`PipelineTab.runRequested` fires.
+6. The parent window (:class:`~anasens.interfaces.gui_app.AnaSensWindow`)
+   spawns the analysis subprocess and streams progress to the log box.
+"""
 
 from __future__ import annotations
 
@@ -30,9 +45,36 @@ from PySide6.QtWidgets import (
 
 @dataclass(slots=True)
 class PipelineRunRequest:
-    """Capture the user-selected pipeline options for future native execution."""
+    """Immutable snapshot of the user-selected pipeline options.
+
+    Created by :meth:`PipelineTab.request_summary` and emitted via
+    :attr:`PipelineTab.runRequested`.  The GUI app shell converts this
+    into a subprocess argument list.
+
+    Attributes:
+        input_folder: Path string to the selected input file or folder.
+        input_source: One of ``"legacy_csv"``, ``"json"``,
+            ``"pssession"``.
+        analysis_mode: ``"single"`` or ``"batch"``.
+        cut_start_points: Points to remove from each scan start.
+        cut_end_points: Points to remove from each scan end.
+        smooth_window_length: SG filter window (must be odd).
+        smooth_polyorder: SG polynomial order.
+        baseline_algo: ``"snip"`` or ``"moving_average"``.
+        baseline_snip_expected_fwhm: SNIP peak FWHM estimate.
+        baseline_snip_window_size: SNIP half-window size.
+        baseline_moving_average_window_size: MA rolling window.
+        baseline_moving_average_forward: MA direction flag.
+        baseline_moving_average_max_iter: MA convergence cap.
+        pairplot: Render seaborn pairplot.
+        drift_2d: Render 2-D drift scatter.
+        drift_1d: Render 1-D drift line plot.
+        overlay_scans: Render scan overlay with peak markers.
+        preprocessing_overview: Render side-by-side preprocessing diagnostic plot.
+    """
 
     input_folder: str
+    input_source: str
     analysis_mode: str
     cut_start_points: int
     cut_end_points: int
@@ -48,11 +90,17 @@ class PipelineRunRequest:
     drift_2d: bool
     drift_1d: bool
     overlay_scans: bool
+    preprocessing_overview: bool
 
 
 @dataclass(slots=True)
 class PreprocessSettings:
-    """Editable preprocessing settings for cut, smooth, and baseline stages."""
+    """Editable preprocessing parameter set bound to the pipeline tab.
+
+    Mirrors :class:`~anasens.config.PreprocessConfig` but lives in the
+    GUI layer so it can be mutated by the settings dialog and JSON loader
+    without touching the config module.
+    """
 
     cut_start_points: int = 0
     cut_end_points: int = 0
@@ -67,7 +115,16 @@ class PreprocessSettings:
 
 
 class PreprocessSettingsDialog(QDialog):
-    """Modal editor for preprocessing stage parameters."""
+    """Modal dialog for editing preprocessing stage parameters.
+
+    Displays a form with spinboxes and comboboxes for every preprocessing
+    parameter.  Algorithm-specific controls are enabled/disabled based on
+    the selected baseline method so users only see relevant fields.
+
+    Args:
+        settings: Current preprocessing settings used to populate the form.
+        parent: Optional parent widget.
+    """
 
     def __init__(self, settings: PreprocessSettings, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -148,7 +205,14 @@ class PreprocessSettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def settings(self) -> PreprocessSettings:
-        """Read edited settings from controls with basic consistency constraints."""
+        """Read and validate the current dialog control values.
+
+        Enforces consistency constraints (odd window, polyorder < window)
+        so the returned settings are always safe to pass to the pipeline.
+
+        Returns:
+            PreprocessSettings: Validated snapshot of the dialog state.
+        """
         window_length = self.smooth_window_spin.value()
         if window_length % 2 == 0:
             window_length += 1
@@ -183,7 +247,18 @@ class PreprocessSettingsDialog(QDialog):
 
 
 class PipelineTab(QWidget):
-    """Collect pipeline settings and launch the native analysis pipeline."""
+    """Pipeline configuration and launch tab.
+
+    Provides controls for input selection, source format, analysis mode,
+    preprocessing configuration, and visualization flags.  Emits
+    :attr:`runRequested` when the user clicks **Run Full Pipeline**;
+    the parent window handles actual subprocess spawning.
+
+    Signals:
+        runRequested (PipelineRunRequest): Fired when the user initiates
+            a pipeline run.  The signal carries a snapshot of all
+            current UI settings.
+    """
 
     runRequested = Signal(object)
 
@@ -207,10 +282,10 @@ class PipelineTab(QWidget):
         input_layout.setContentsMargins(16, 16, 16, 16)
         input_layout.setSpacing(12)
 
-        folder_label = QLabel("Input folder")
+        folder_label = QLabel("Input path")
         folder_label.setObjectName("sectionTitle")
         self.folder_edit = QLineEdit()
-        self.folder_edit.setPlaceholderText(r"Select a folder containing voltammogram CSV files")
+        self.folder_edit.setPlaceholderText(r"Select input path")
         self.folder_button = QPushButton("Browse")
         self.folder_button.clicked.connect(self._choose_folder)
 
@@ -219,6 +294,16 @@ class PipelineTab(QWidget):
         folder_row.addWidget(self.folder_button)
         input_layout.addWidget(folder_label)
         input_layout.addLayout(folder_row)
+
+        source_label = QLabel("Input source")
+        source_label.setObjectName("sectionTitle")
+        self.input_source_combo = QComboBox()
+        self.input_source_combo.addItem("Legacy CSV", "legacy_csv")
+        self.input_source_combo.addItem("Converted JSON", "json")
+        self.input_source_combo.addItem("Direct pssession", "pssession")
+        self.input_source_combo.currentIndexChanged.connect(self._refresh_input_path_hint)
+        input_layout.addWidget(source_label)
+        input_layout.addWidget(self.input_source_combo)
 
         mode_label = QLabel("Analysis mode")
         mode_label.setObjectName("sectionTitle")
@@ -262,14 +347,17 @@ class PipelineTab(QWidget):
         self.drift_2d_check = QCheckBox("2D peak-coordinate drift")
         self.drift_1d_check = QCheckBox("1D peak-coordinate drift")
         self.overlay_check = QCheckBox("Overlay tagged sweeps")
+        self.preprocessing_overview_check = QCheckBox("Preprocessing overview (raw / smoothed / baseline)")
         self.pairplot_check.setChecked(True)
         self.drift_2d_check.setChecked(True)
         self.drift_1d_check.setChecked(True)
         self.overlay_check.setChecked(True)
+        self.preprocessing_overview_check.setChecked(True)
         viz_layout.addWidget(self.pairplot_check)
         viz_layout.addWidget(self.drift_2d_check)
         viz_layout.addWidget(self.drift_1d_check)
         viz_layout.addWidget(self.overlay_check)
+        viz_layout.addWidget(self.preprocessing_overview_check)
 
         top_cards_row = QHBoxLayout()
         top_cards_row.setSpacing(12)
@@ -298,9 +386,14 @@ class PipelineTab(QWidget):
         layout.addWidget(self.log_output, 1)
 
     def request_summary(self) -> PipelineRunRequest:
-        """Collect the current UI state into a lightweight request object."""
+        """Collect the current UI state into a :class:`PipelineRunRequest`.
+
+        Returns:
+            PipelineRunRequest: Snapshot of all current tab settings.
+        """
         return PipelineRunRequest(
             input_folder=self.folder_edit.text().strip(),
+            input_source=str(self.input_source_combo.currentData()),
             analysis_mode="single" if self.single_mode.isChecked() else "batch",
             cut_start_points=self._preprocess_settings.cut_start_points,
             cut_end_points=self._preprocess_settings.cut_end_points,
@@ -316,29 +409,79 @@ class PipelineTab(QWidget):
             drift_2d=self.drift_2d_check.isChecked(),
             drift_1d=self.drift_1d_check.isChecked(),
             overlay_scans=self.overlay_check.isChecked(),
+            preprocessing_overview=self.preprocessing_overview_check.isChecked(),
         )
 
     def _choose_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select voltammogram folder")
-        if folder:
-            self.folder_edit.setText(folder)
-            self.status_label.setText(f"Selected folder: {folder}")
+        """Open a source-appropriate file/folder picker and populate the path field.
+
+        * **Legacy CSV** always shows a folder picker.
+        * **JSON / pssession single mode** shows a file picker filtered
+          to the relevant extension.
+        * **Any source in batch mode** shows a folder picker.
+        """
+        source = str(self.input_source_combo.currentData())
+        single_mode = self.single_mode.isChecked()
+
+        if source == "legacy_csv" or not single_mode:
+            selected = QFileDialog.getExistingDirectory(self, "Select input folder")
+            if selected:
+                self.folder_edit.setText(selected)
+                self.status_label.setText(f"Selected folder: {selected}")
+            return
+
+        if source == "json":
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select converted JSON file",
+                "",
+                "JSON files (*.json);;All files (*.*)",
+            )
+            if file_path:
+                self.folder_edit.setText(file_path)
+                self.status_label.setText(f"Selected file: {file_path}")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select pssession file",
+            "",
+            "PSSession files (*.pssession);;All files (*.*)",
+        )
+        if file_path:
+            self.folder_edit.setText(file_path)
+            self.status_label.setText(f"Selected file: {file_path}")
 
     def _clear_form(self) -> None:
         self.folder_edit.clear()
+        self.input_source_combo.setCurrentIndex(0)
         self.single_mode.setChecked(True)
         self._preprocess_settings = PreprocessSettings()
         self._refresh_preprocess_summary()
+        self._refresh_input_path_hint()
         self.pairplot_check.setChecked(True)
         self.drift_2d_check.setChecked(True)
         self.drift_1d_check.setChecked(True)
         self.overlay_check.setChecked(True)
+        self.preprocessing_overview_check.setChecked(True)
         self.status_label.setText("Ready.")
         self.log_output.clear()
 
     def _run_pipeline(self) -> None:
         request = self.request_summary()
         self.runRequested.emit(request)
+
+    def _refresh_input_path_hint(self) -> None:
+        source = str(self.input_source_combo.currentData())
+        if source == "legacy_csv":
+            self.folder_edit.setPlaceholderText("Select a CSV measurement folder (single) or folder of measurement folders (batch)")
+            return
+
+        if source == "json":
+            self.folder_edit.setPlaceholderText("Single: one JSON file. Batch: folder of JSON files")
+            return
+
+        self.folder_edit.setPlaceholderText("Single: one .pssession file. Batch: folder of .pssession files")
 
     def _open_preprocess_settings(self) -> None:
         dialog = PreprocessSettingsDialog(self._preprocess_settings, self)
@@ -543,6 +686,10 @@ class PipelineTab(QWidget):
         if text:
             self.log_output.appendPlainText(text.rstrip())
 
+    def set_status_message(self, text: str) -> None:
+        """Set the status banner text shown beneath the controls."""
+        self.status_label.setText(text)
+
     def set_running_state(self, running: bool) -> None:
         """Update button state while a pipeline process is active."""
         self.run_button.setEnabled(not running)
@@ -550,4 +697,4 @@ class PipelineTab(QWidget):
         self.preprocess_button.setEnabled(not running)
         self.preprocess_load_button.setEnabled(not running)
         self.clear_button.setEnabled(not running)
-        self.status_label.setText("Running..." if running else "Ready.")
+        self.set_status_message("Running..." if running else "Ready.")

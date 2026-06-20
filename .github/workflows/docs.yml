@@ -1,8 +1,9 @@
-name: Docs
+name: Docs Pages (Tags)
 
 on:
   push:
-    branches: [ main ]
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -30,7 +31,9 @@ jobs:
           path: docs/_build/html
 
   deploy:
-    if: github.ref == 'refs/heads/main'
+    # Only deploy when the triggering event is a v*.*.* tag push, not on
+    # manual workflow_dispatch runs (which would overwrite a tagged release).
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref, '.')
     needs: build-docs
     runs-on: ubuntu-latest
     environment:

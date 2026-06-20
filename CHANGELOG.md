@@ -27,7 +27,7 @@
 - Integrated Plotter-Fitter into AnaSens under `src/anasens/curve_builder` to preserve existing curve-fitting functionality inside the main package.
 - Replaced the Curve Builder placeholder tab with an embedded Plotter-Fitter interface in the main GUI.
 - Added Plotter-Fitter runtime dependencies (`sympy`, `antlr4-python3-runtime`, `openpyxl`) to AnaSens project dependencies.
-- Added Plotter-Fitter runtime dependencies to the `gui` optional dependency group so `.[gui]` installs are explicit for Curve Builder support.
+- Temporarily documented Plotter-Fitter dependencies under a `gui` extra during migration; this was later removed in favor of default dependencies.
 - Updated package docs (`README.md`, `QUICK_START.md`, `ARCHITECTURE.md`) to describe the integrated Plotter-Fitter Curve Builder tab and its retained capabilities.
 - Moved GUI runtime dependencies into default project dependencies and removed the separate `gui` extras requirement, so standard install supports the only GUI workflow.
 - Implemented a native object-oriented pipeline (`NativeAnalysisPipeline`) with separated loader, preprocessing, extraction, tabulation, persistence, and visualization responsibilities.
@@ -37,6 +37,17 @@
 - Added a native `src/anasens/inverse_regression` package with object-oriented data loading, estimation service, and typed result models.
 - Replaced the Inverse Estimation placeholder with a functional Qt tab that replicates legacy inverse-regression intent (quantile/least-squares modes, estimates table, CSV export).
 - Added Curve Builder model export in the packaged GUI (plot image, pickled standard-curve object, and fit details), enabling inverse-estimation input artifacts from the new package.
+- Added robust GUI pipeline process logging so both stdout and stderr lines are shown in the Pipeline tab output panel.
+- Refined pssession/json output folder strategy to use one source-level master folder with tagged filenames across shared Analysis subfolders.
+- Added streaming batch execution for directory-based pssession/json runs (one source file at a time) to reduce peak memory usage.
+- Removed redundant `I_original` from processed CSV exports and retained raw current in the existing `I` column.
+- Corrected moving-average baseline semantics so `baseline` stores the baseline estimate and `I_corrected` is computed as `I_smoothed - baseline`.
+- Added trailing-edge correction for moving-average baseline subtraction: points not covered by full windows are zeroed in `I_corrected`.
+- Added preprocessing overview visualization (side-by-side raw/smoothed/baseline overlay and corrected trace) with GUI and CLI toggles.
+- Fixed preprocessing overview layout warning by switching to constrained layout for multi-axis colorbar rendering.
+- Removed Curve Builder subtitle text (`Neon plotting and curve fitting for tabular data`) per UI simplification.
+- Updated executable build automation to trigger on version tags (`v*.*.*`) and attach Windows exe artifacts to GitHub Releases.
+- Fixed executable build install path to use declared dependencies (`pip install -e .`) instead of removed `.[gui]` extras.
 
 ## 0.1.0
 

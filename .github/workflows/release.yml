@@ -1,25 +1,61 @@
 name: Release
 
+# Triggered only on semantic-version tags (e.g. v1.2.3).
+# Builds sdist + wheel with setuptools and publishes a GitHub Release with
+# those dist files attached.
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
 
 jobs:
-  build-artifacts:
+  build-and-release:
+    name: Build and publish GitHub Release
     runs-on: ubuntu-latest
+
+    # Write permission is needed to create the GitHub Release.
+    permissions:
+      contents: write
+
     steps:
+      # ── Checkout at the tagged commit ─────────────────────────────────
       - uses: actions/checkout@v4
+
+      # ── Python + pip cache ────────────────────────────────────────────
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # ── Upgrade build toolchain ───────────────────────────────────────
+      - name: Upgrade build tools
+        run: python -m pip install --upgrade pip setuptools wheel build
+
+      # ── Build sdist and wheel ─────────────────────────────────────────
       - name: Build sdist and wheel
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build
-          python -m build
-      - name: Upload dist artifacts
+        run: python -m build
+
+      # ── Verify dist contents ──────────────────────────────────────────
+      - name: List built artifacts
+        run: ls -lh dist/
+
+      # ── Upload to GitHub Actions artifact store ───────────────────────
+      # Stored as a workflow artifact so they are available for manual
+      # download independently of the release.
+      - name: Upload dist as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: python-dist-${{ github.ref_name }}
           path: dist/*
+
+      # ── Create GitHub Release and attach dist files ───────────────────
+      # The release body is auto-generated from the tag name.  Edit the
+      # body field below if you want richer release notes.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: AnaSens2 ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*

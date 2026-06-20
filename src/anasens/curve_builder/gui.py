@@ -326,10 +326,6 @@ class PlotterFitterGUI(QMainWindow):
         title_label.setObjectName("title")
         outer_layout.addWidget(title_label, 0, 0, 1, 2)
 
-        subtitle_label = QLabel("Neon plotting and curve fitting for tabular data")
-        subtitle_label.setObjectName("subtitle")
-        outer_layout.addWidget(subtitle_label, 1, 0, 1, 2)
-
         control_frame = self._create_card_frame()
         stats_frame = self._create_card_frame()
         stats_frame.setObjectName("accentCard")

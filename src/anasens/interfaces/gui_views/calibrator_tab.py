@@ -102,7 +102,14 @@ class CalibratorTab(QWidget):
         # Analyte / Control labels
         labels_card = self._make_card()
         labels_layout = QVBoxLayout(labels_card)
-        labels_layout.addWidget(self._section_label("Labels"))
+        labels_layout.addWidget(self._section_label("Grouping"))
+
+        group_row = QHBoxLayout()
+        group_row.addWidget(QLabel("Filter column"))
+        self._group_column_combo = QComboBox()
+        self._group_column_combo.currentIndexChanged.connect(self._on_group_column_changed)
+        group_row.addWidget(self._group_column_combo, 1)
+        labels_layout.addLayout(group_row)
 
         analyte_row = QHBoxLayout()
         analyte_row.addWidget(QLabel("Analyte"))
@@ -214,7 +221,7 @@ class CalibratorTab(QWidget):
                 return
             try:
                 self._dataframe = load_data_table(Path(path))
-                self._populate_label_combos(self._dataframe)
+                self._populate_group_columns(self._dataframe)
                 self._populate_filter_columns(self._dataframe)
                 self._load_status.setText(f"Loaded: {Path(path).name}")
                 self._log_message(f"Loaded CSV: {path}")
@@ -229,7 +236,7 @@ class CalibratorTab(QWidget):
             try:
                 self._measurements = load_measurement_objects(Path(folder))
                 first_df = self._measurements[0].extracted_parameters
-                self._populate_label_combos(first_df)
+                self._populate_group_columns(first_df)
                 self._populate_filter_columns(first_df)
                 count = len(self._measurements)
                 self._load_status.setText(f"Loaded {count} measurement objects")
@@ -237,19 +244,68 @@ class CalibratorTab(QWidget):
             except Exception as exc:
                 QMessageBox.critical(self, "Load failed", str(exc))
 
-    def _populate_label_combos(self, dataframe: pd.DataFrame) -> None:
-        labels: list[str] = (
-            sorted(dataframe["Label"].dropna().unique().tolist())
-            if "Label" in dataframe.columns
-            else []
-        )
+    def _populate_group_columns(self, dataframe: pd.DataFrame) -> None:
+        current = self._group_column_combo.currentText()
+        candidate_columns = [column for column in dataframe.columns if dataframe[column].dropna().nunique() > 0]
+        self._group_column_combo.blockSignals(True)
+        self._group_column_combo.clear()
+        self._group_column_combo.addItems(candidate_columns)
+        if current and current in candidate_columns:
+            self._group_column_combo.setCurrentText(current)
+        elif "Label" in candidate_columns:
+            self._group_column_combo.setCurrentText("Label")
+        self._group_column_combo.blockSignals(False)
+        self._on_group_column_changed()
+
+    def _on_group_column_changed(self) -> None:
+        self._refresh_group_values()
+        dataframe = self._active_dataframe()
+        if dataframe is not None:
+            self._populate_filter_columns(dataframe)
+        self._match_filters = [
+            column for column in self._match_filters if column != self._group_column_combo.currentText()
+        ]
+        self._rebuild_filter_chips()
+
+    def _refresh_group_values(self) -> None:
+        group_column = self._group_column_combo.currentText()
+        values = self._group_column_values(group_column)
         for combo in (self._analyte_combo, self._control_combo):
             combo.clear()
-            combo.addItems(labels)
+            combo.addItems(values)
+
+    def _active_dataframe(self) -> pd.DataFrame | None:
+        if self._mode == "data_table":
+            return self._dataframe
+        if self._measurements:
+            return self._measurements[0].extracted_parameters
+        return None
+
+    def _all_dataframes(self) -> list[pd.DataFrame]:
+        if self._mode == "data_table":
+            return [self._dataframe] if self._dataframe is not None else []
+        return [measurement.extracted_parameters for measurement in self._measurements]
+
+    def _group_column_values(self, column: str) -> list[str]:
+        values: set[str] = set()
+        for dataframe in self._all_dataframes():
+            if column not in dataframe.columns:
+                continue
+            values.update(self._unique_column_values(dataframe, column))
+        return sorted(values)
+
+    @staticmethod
+    def _unique_column_values(dataframe: pd.DataFrame | None, column: str) -> list[str]:
+        if dataframe is None or not column or column not in dataframe.columns:
+            return []
+        series = dataframe[column].dropna()
+        return sorted({str(value) for value in series.tolist()})
 
     def _populate_filter_columns(self, dataframe: pd.DataFrame) -> None:
         self._filter_column_combo.clear()
-        self._filter_column_combo.addItems(dataframe.columns.tolist())
+        group_column = self._group_column_combo.currentText()
+        filter_columns = [column for column in dataframe.columns.tolist() if column != group_column]
+        self._filter_column_combo.addItems(filter_columns)
 
     def _add_filter(self) -> None:
         column = self._filter_column_combo.currentText()
@@ -273,15 +329,24 @@ class CalibratorTab(QWidget):
 
     def _clear_filters(self) -> None:
         self._match_filters.clear()
+        self._rebuild_filter_chips()
+
+    def _rebuild_filter_chips(self) -> None:
         while self._filter_list_layout.count():
             widget = self._filter_list_layout.takeAt(0).widget()
             if widget:
                 widget.deleteLater()
+        for column in self._match_filters:
+            chip = QCheckBox(column)
+            chip.setChecked(True)
+            chip.stateChanged.connect(lambda _, col=column: self._remove_filter_by_name(col))
+            self._filter_list_layout.addWidget(chip)
 
     def _build_request(self) -> CalibrationRequest:
         method_text = self._method_combo.currentText()
         method = "subcal" if "subcal" in method_text else "divcal"
         return CalibrationRequest(
+            group_column=self._group_column_combo.currentText(),
             analyte_label=self._analyte_combo.currentText(),
             control_label=self._control_combo.currentText(),
             method=method,
@@ -290,8 +355,11 @@ class CalibratorTab(QWidget):
 
     def _run_calibration(self) -> None:
         request = self._build_request()
+        if not request.group_column:
+            QMessageBox.warning(self, "Missing selection", "Select a filter column first.")
+            return
         if not request.analyte_label or not request.control_label:
-            QMessageBox.warning(self, "Missing selection", "Select analyte and control labels.")
+            QMessageBox.warning(self, "Missing selection", "Select analyte and control values.")
             return
 
         try:

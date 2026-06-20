@@ -1,4 +1,14 @@
-"""Qt GUI launcher for AnaSens2."""
+"""Qt GUI application shell for AnaSens2.
+
+This module owns the top-level Qt window, the tab bar, and all
+inter-component wiring.  Analysis work is intentionally executed in a
+separate process (via :mod:`anasens.interfaces.pipeline_launcher`) so
+the GUI event loop remains responsive during long runs.
+
+Progress messages are exchanged over stdout of the subprocess:
+lines prefixed with ``[PROGRESS]`` update the status banner; all other
+lines are appended to the log panel.
+"""
 
 from __future__ import annotations
 
@@ -90,11 +100,19 @@ class SynthwaveBackdrop(QWidget):
 
 
 class AnaSensWindow(QMainWindow):
-    """Main Qt shell for the AnaSens2 application."""
+    """Main Qt application window for AnaSens2.
+
+    Hosts the tabbed interface and owns the :class:`~PySide6.QtCore.QProcess`
+    used to spawn the analysis pipeline subprocess.  Progress output from
+    the subprocess is streamed line-by-line to the pipeline tab log and
+    status label.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self._process: QProcess | None = None
+        self._process_output_buffer = ""
+        self._process_stderr_buffer = ""
 
         self.setWindowTitle("AnaSens2")
         self.resize(1420, 900)
@@ -252,8 +270,17 @@ class AnaSensWindow(QMainWindow):
         self.pipeline_tab.runRequested.connect(self._launch_native_pipeline)
 
     def _launch_native_pipeline(self, request: PipelineRunRequest) -> None:
+        """Spawn the analysis pipeline in a subprocess from a run request.
+
+        The pipeline runs out-of-process so the Qt event loop is never
+        blocked.  All subprocess stdout/stderr is routed to the pipeline
+        tab log via :meth:`_read_process_output`.
+
+        Args:
+            request: Snapshot of the current pipeline tab settings.
+        """
         if not request.input_folder:
-            self.pipeline_tab.append_log("Select an input folder before running the pipeline.")
+            self.pipeline_tab.append_log("Select an input path before running the pipeline.")
             return
 
         self.pipeline_tab.append_log(
@@ -267,9 +294,11 @@ class AnaSensWindow(QMainWindow):
             self._process.deleteLater()
 
         self._process = QProcess(self)
-        self._process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._process_output_buffer = ""
+        self._process_stderr_buffer = ""
+        self._process.setProcessChannelMode(QProcess.ProcessChannelMode.SeparateChannels)
         self._process.readyReadStandardOutput.connect(self._read_process_output)
-        self._process.readyReadStandardError.connect(self._read_process_output)
+        self._process.readyReadStandardError.connect(self._read_process_error)
         self._process.finished.connect(lambda *_: self._process_finished())
 
         args = [
@@ -277,6 +306,8 @@ class AnaSensWindow(QMainWindow):
             "anasens.interfaces.pipeline_launcher",
             "--input-folder",
             request.input_folder,
+            "--input-source",
+            request.input_source,
             "--analysis-mode",
             request.analysis_mode,
             "--cut-start-points",
@@ -304,6 +335,7 @@ class AnaSensWindow(QMainWindow):
             "--drift-2d" if request.drift_2d else "--no-drift-2d",
             "--drift-1d" if request.drift_1d else "--no-drift-1d",
             "--overlay-scans" if request.overlay_scans else "--no-overlay-scans",
+            "--preprocessing-overview" if request.preprocessing_overview else "--no-preprocessing-overview",
         ]
         self._process.start(sys.executable, args)
         self.pipeline_tab.set_running_state(True)
@@ -328,17 +360,86 @@ class AnaSensWindow(QMainWindow):
             request.smooth_window_length,
             request.smooth_polyorder,
             baseline_summary,
-            request.input_folder or "[not set]",
+            f"source={request.input_source}, path={request.input_folder or '[not set]'}",
         )
 
     def _read_process_output(self) -> None:
-        if self._process is None:
+        """Read available subprocess output and route to the log and status banner.
+
+        Buffers partial lines across multiple ``readyReadStandardOutput``
+        signals so that multi-line progress messages are always delivered
+        as complete lines to :meth:`_handle_process_line`.
+        """
+        if not self._process:
             return
         output = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        if output:
-            self.pipeline_tab.append_log(output)
+        if not output:
+            return
+
+        self._process_output_buffer += output
+        lines = self._process_output_buffer.splitlines(keepends=True)
+
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._process_output_buffer = lines[-1]
+            lines = lines[:-1]
+        else:
+            self._process_output_buffer = ""
+
+        for raw_line in lines:
+            line = raw_line.rstrip("\r\n")
+            if line:
+                self._handle_process_line(line)
+
+    def _read_process_error(self) -> None:
+        """Read available subprocess stderr and route to the log.
+
+        Buffers partial lines across multiple ``readyReadStandardError``
+        signals so that multi-line error messages are always delivered
+        as complete lines to :meth:`_handle_process_line`.
+        """
+        if not self._process:
+            return
+        error_output = bytes(self._process.readAllStandardError()).decode("utf-8", errors="replace")
+        if not error_output:
+            return
+
+        self._process_stderr_buffer += error_output
+        lines = self._process_stderr_buffer.splitlines(keepends=True)
+
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._process_stderr_buffer = lines[-1]
+            lines = lines[:-1]
+        else:
+            self._process_stderr_buffer = ""
+
+        for raw_line in lines:
+            line = raw_line.rstrip("\r\n")
+            if line:
+                self._handle_process_line(f"[ERROR] {line}")
+
+    def _handle_process_line(self, line: str) -> None:
+        """Route one decoded output line to the log panel and optionally the status bar.
+
+        Lines prefixed with ``[PROGRESS]`` additionally update the
+        pipeline tab status label so the user sees live measurement
+        counters without scrolling the log.  All other lines are appended
+        to the log panel.
+
+        Args:
+            line: Decoded, stripped output line from the subprocess.
+        """
+        if line.startswith("[PROGRESS] "):
+            self.pipeline_tab.set_status_message(line.removeprefix("[PROGRESS] "))
+        # Always append to log, whether it's a progress line, regular output, or error
+        self.pipeline_tab.append_log(line)
 
     def _process_finished(self) -> None:
+        if self._process_output_buffer.strip():
+            self._handle_process_line(self._process_output_buffer.strip())
+        if self._process_stderr_buffer.strip():
+            self._handle_process_line(f"[ERROR] {self._process_stderr_buffer.strip()}")
+        self._process_output_buffer = ""
+        self._process_stderr_buffer = ""
         self.pipeline_tab.set_running_state(False)
         self.pipeline_tab.append_log("Native pipeline process finished.")
 

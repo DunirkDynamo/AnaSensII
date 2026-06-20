@@ -1,4 +1,9 @@
-"""Core calibration logic — pure computation, no UI."""
+"""Core calibration logic (pure computation, no UI concerns).
+
+This module provides calibrators that operate on extracted-parameter tables and
+measurement object collections. It intentionally avoids GUI and filesystem code
+so it can be tested and reused independently.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ from anasens.calibrator.models import (
 class DataTableCalibrator:
     """Calibrate a single extracted-parameters DataFrame.
 
-    Matches each analyte row to exactly one control row using the Label column
+    Matches each analyte row to exactly one control row using a caller-selected grouping column
     and any caller-specified match-filter columns, then applies the requested
     arithmetic calibration method to the peak_heights column.
     """
@@ -26,7 +31,7 @@ class DataTableCalibrator:
         """Pair analyte and control rows and compute calibration values.
 
         Args:
-            dataframe: Extracted-parameters table containing at least Label and peak_heights.
+            dataframe: Extracted-parameters table containing at least the grouping column and peak_heights.
             request: Fully specified calibration request.
 
         Returns:
@@ -34,20 +39,36 @@ class DataTableCalibrator:
 
         Raises:
             ValueError: If required columns are absent or labels are not found.
+
+        Example:
+            >>> request = CalibrationRequest(
+            ...     group_column="Condition",
+            ...     analyte_label="Analyte",
+            ...     control_label="Control",
+            ...     method="subcal",
+            ...     match_filters=["MeasurementName", "CurveIndex"],
+            ... )
+            >>> result = DataTableCalibrator().calibrate(df, request)
+            >>> "subcal" in result.result_table.columns
+            True
         """
         self._validate(dataframe, request)
 
-        analyte_rows = dataframe[dataframe["Label"] == request.analyte_label]
-        control_rows = dataframe[dataframe["Label"] == request.control_label]
+        # Select analyte and control rows based on the chosen grouping column.
+        analyte_rows = dataframe[dataframe[request.group_column] == request.analyte_label]
+        control_rows = dataframe[dataframe[request.group_column] == request.control_label]
 
+        # Build one output record per analyte row after best-effort matching.
         records: list[dict] = []
         for _, analyte_row in analyte_rows.iterrows():
+            # Start with all control rows, then constrain by requested match filters.
             match_mask = pd.Series([True] * len(control_rows), index=control_rows.index)
             for column in request.match_filters:
                 match_mask &= control_rows[column] == analyte_row[column]
 
             matched = control_rows[match_mask]
             if len(matched) != 1:
+                # Non-unique or missing match cannot be calibrated deterministically.
                 calibrated_value = np.nan
                 control_height = np.nan
             else:
@@ -56,6 +77,8 @@ class DataTableCalibrator:
                 calibrated_value = self._apply_method(analyte_height, control_height, request.method)
 
             record: dict = {
+                # Echo grouping metadata for traceable calibration rows.
+                request.group_column: analyte_row[request.group_column],
                 "Analyte": request.analyte_label,
                 "Control": request.control_label,
                 f"peak_heights_{request.analyte_label}": float(analyte_row["peak_heights"]),
@@ -80,19 +103,33 @@ class DataTableCalibrator:
         )
 
     def _validate(self, dataframe: pd.DataFrame, request: CalibrationRequest) -> None:
-        required = {"Label", "peak_heights"}
+        """Validate calibration input table and request semantics.
+
+        Args:
+            dataframe: Candidate extracted-parameter table.
+            request: User-selected calibration request.
+
+        Raises:
+            ValueError: If required columns or values are missing.
+        """
+        required = {request.group_column, "peak_heights"}
         missing = required - set(dataframe.columns)
         if missing:
             raise ValueError(f"DataFrame is missing required columns: {missing}")
-        if request.analyte_label not in dataframe["Label"].values:
-            raise ValueError(f"Analyte label '{request.analyte_label}' not found in Label column.")
-        if request.control_label not in dataframe["Label"].values:
-            raise ValueError(f"Control label '{request.control_label}' not found in Label column.")
+        if request.analyte_label not in dataframe[request.group_column].values:
+            raise ValueError(
+                f"Analyte value '{request.analyte_label}' not found in column '{request.group_column}'."
+            )
+        if request.control_label not in dataframe[request.group_column].values:
+            raise ValueError(
+                f"Control value '{request.control_label}' not found in column '{request.group_column}'."
+            )
         for column in request.match_filters:
             if column not in dataframe.columns:
                 raise ValueError(f"Match filter column '{column}' not found in DataFrame.")
 
     def _apply_method(self, analyte: float, control: float, method: CalibrationMethod) -> float:
+        """Apply calibration arithmetic method to one analyte/control pair."""
         if method == "subcal":
             return analyte - control
         if method == "divcal":
@@ -100,8 +137,10 @@ class DataTableCalibrator:
         raise ValueError(f"Unsupported calibration method: {method}")
 
     def _order_columns(self, table: pd.DataFrame, request: CalibrationRequest) -> pd.DataFrame:
+        """Order output columns for readability and downstream consistency."""
         preferred_order = (
-            request.match_filters
+            [request.group_column]
+            + request.match_filters
             + ["Timestamp", "Analyte", "Control",
                f"peak_heights_{request.analyte_label}",
                f"peak_heights_{request.control_label}",
@@ -139,11 +178,13 @@ class MeasurementObjectCalibrator:
         Raises:
             ValueError: If no measurements could be calibrated.
         """
+        # Accumulate per-measurement and pooled calibration outputs.
         per_measurement: dict[str, pd.DataFrame] = {}
         stacked_rows: list[pd.DataFrame] = []
 
         for measurement in measurements:
             try:
+                # Reuse single-table calibrator for each measurement payload.
                 result = self._single_calibrator.calibrate(measurement.extracted_parameters, request)
                 table = result.result_table.copy()
                 table.insert(0, "Measurement", measurement.measurement_name)

@@ -16,6 +16,7 @@ CalibrationMode = Literal["data_table", "measurement_objects"]
 class CalibrationRequest:
     """Fully describes a calibration run: what to compare, how, and on which columns to match."""
 
+    group_column: str
     analyte_label: str
     control_label: str
     method: CalibrationMethod

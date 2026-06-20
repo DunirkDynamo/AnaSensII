@@ -9,5 +9,5 @@ def save_plot(fig: Figure, save_path: Path, filename: str = "plot.png", dpi: int
     """Save matplotlib figure and return output path."""
     save_path.mkdir(parents=True, exist_ok=True)
     out = save_path / filename
-    fig.savefig(out, dpi=dpi)
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
     return out
