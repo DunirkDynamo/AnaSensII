@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsDropShadowEffect,
-    QLabel,
     QMainWindow,
     QTabWidget,
     QVBoxLayout,
@@ -228,24 +227,8 @@ class AnaSensWindow(QMainWindow):
         self.setCentralWidget(backdrop)
 
         outer_layout = QVBoxLayout(backdrop)
-        outer_layout.setContentsMargins(18, 18, 18, 18)
-        outer_layout.setSpacing(14)
-
-        header_card = QFrame(backdrop)
-        header_card.setObjectName("card")
-        header_layout = QVBoxLayout(header_card)
-        header_layout.setContentsMargins(16, 16, 16, 16)
-
-        title = QLabel("AnaSens2")
-        title.setObjectName("title")
-        header_layout.addWidget(title)
-
-        shadow = QGraphicsDropShadowEffect(header_card)
-        shadow.setBlurRadius(28)
-        shadow.setOffset(0, 10)
-        shadow.setColor(QColor(255, 90, 200, 70))
-        header_card.setGraphicsEffect(shadow)
-        outer_layout.addWidget(header_card)
+        outer_layout.setContentsMargins(16, 16, 16, 16)
+        outer_layout.setSpacing(10)
 
         tab_card = QFrame(backdrop)
         tab_card.setObjectName("card")

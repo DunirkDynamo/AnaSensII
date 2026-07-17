@@ -8,6 +8,7 @@ import re
 
 import numpy as np
 from scipy.optimize import curve_fit
+import statsmodels.api as sm
 from sympy import Symbol, diff, lambdify
 from sympy.parsing.sympy_parser import (
     convert_xor,
@@ -37,6 +38,9 @@ class PreparedModel:
     function: Callable[..., np.ndarray]
     display_equation: str
     initial_guess: tuple[float, ...] | None = None
+    gradient_function: Callable[..., np.ndarray] | None = None
+    hessian_function: Callable[..., np.ndarray] | None = None
+    third_derivative_function: Callable[..., np.ndarray] | None = None
 
 
 @dataclass(slots=True)
@@ -52,6 +56,9 @@ class DerivativeFunctionRegistry:
     names: list[str]
     functions_by_name: dict[str, Callable[..., np.ndarray]]
     parameters_by_name: dict[str, str]
+    gradient_function: Callable[..., np.ndarray] | None = None
+    hessian_function: Callable[..., np.ndarray] | None = None
+    third_derivative_function: Callable[..., np.ndarray] | None = None
 
 
 class FitService:
@@ -153,6 +160,84 @@ class FitService:
         prepared_model = self._prepare_custom_model(latex_expression, parameter_names)
         return self._fit_model(x_values, y_values, prepared_model)
 
+    def fit_quantile_polynomial(
+        self,
+        x_values: np.ndarray,
+        y_values: np.ndarray,
+        order: int,
+        coverage: float = 0.95,
+    ) -> FittingResult:
+        """Fit polynomial quantile regression with median as the model curve.
+
+        The returned model is the median quantile (q=0.5), and prediction
+        interval bounds are represented by symmetric quantiles derived from
+        the requested coverage.
+        """
+        if order < 1:
+            raise ValueError("Polynomial order must be at least 1.")
+        if not (0.0 < coverage < 1.0):
+            raise ValueError("coverage must satisfy 0 < coverage < 1.")
+
+        x_numeric = np.asarray(x_values, dtype=float)
+        y_numeric = np.asarray(y_values, dtype=float)
+        degree = int(order)
+        alpha = 1.0 - float(coverage)
+        lower_q = alpha / 2.0
+        upper_q = 1.0 - alpha / 2.0
+
+        design = np.vander(x_numeric, degree + 1, increasing=True)
+
+        lower_model = sm.QuantReg(y_numeric, design)
+        median_model = sm.QuantReg(y_numeric, design)
+        upper_model = sm.QuantReg(y_numeric, design)
+
+        lower_result = lower_model.fit(q=lower_q, method="interior")
+        median_result = median_model.fit(q=0.5, method="interior")
+        upper_result = upper_model.fit(q=upper_q, method="interior")
+
+        beta_lower = np.asarray(lower_result.params, dtype=float)
+        beta_median = np.asarray(median_result.params, dtype=float)
+        beta_upper = np.asarray(upper_result.params, dtype=float)
+
+        def eval_poly(x_data: np.ndarray, beta: np.ndarray) -> np.ndarray:
+            x_array = np.asarray(x_data, dtype=float)
+            return sum(b * np.power(x_array, idx) for idx, b in enumerate(beta))
+
+        def median_model_function(x_data: np.ndarray, *parameters: float) -> np.ndarray:
+            params = np.asarray(parameters, dtype=float)
+            return eval_poly(np.asarray(x_data, dtype=float), params)
+
+        fitted_x = np.linspace(np.min(x_numeric), np.max(x_numeric), 400)
+        fitted_y = eval_poly(fitted_x, beta_median)
+        fitted_on_data = eval_poly(x_numeric, beta_median)
+        residuals = y_numeric - fitted_on_data
+        dof = float(max(len(x_numeric) - len(beta_median), 1))
+        residual_std = float(np.sqrt(max(np.sum(np.square(residuals)) / dof, 0.0)))
+
+        parameter_names = [f"a{i}" for i in range(degree + 1)]
+
+        return FittingResult(
+            model_name=f"Quantile regression (poly order {degree}, median)",
+            parameter_names=parameter_names,
+            parameter_values=beta_median,
+            fitted_x=fitted_x,
+            fitted_y=fitted_y,
+            display_equation=self._build_polynomial_equation(order),
+            model_function=median_model_function,
+            covariance=None,
+            residual_std=residual_std,
+            dof=dof,
+            fit_method="quantile_regression",
+            extras={
+                "degree": degree,
+                "coverage": float(coverage),
+                "quantiles": (lower_q, 0.5, upper_q),
+                "beta_lower": beta_lower,
+                "beta_median": beta_median,
+                "beta_upper": beta_upper,
+            },
+        )
+
     def build_custom_model_and_derivatives(
         self,
         latex_expression: str,
@@ -212,6 +297,9 @@ class FitService:
         derivative_names: list[str] = []
         derivative_functions_by_name: dict[str, Callable[..., np.ndarray]] = {}
         parameters_by_name: dict[str, str] = {}
+        gradient_lambdas: list[Callable[..., np.ndarray]] = []
+        hessian_lambdas: list[list[Callable[..., np.ndarray]]] = []
+        third_lambdas: list[list[list[Callable[..., np.ndarray]]]] = []
 
         for parameter_name, parameter_symbol in zip(parameter_names, parameter_symbols, strict=False):
             derivative_name = f"d_model_d_{parameter_name}"
@@ -224,11 +312,52 @@ class FitService:
             derivative_names.append(derivative_name)
             derivative_functions_by_name[derivative_name] = derivative_function
             parameters_by_name[derivative_name] = parameter_name
+            gradient_lambdas.append(derivative_lambda)
+
+        for parameter_symbol_i in parameter_symbols:
+            hessian_row: list[Callable[..., np.ndarray]] = []
+            for parameter_symbol_j in parameter_symbols:
+                hessian_expression = diff(expression, parameter_symbol_i, parameter_symbol_j)
+                hessian_lambda = lambdify((x_symbol, *parameter_symbols), hessian_expression, modules="numpy")
+                hessian_row.append(hessian_lambda)
+            hessian_lambdas.append(hessian_row)
+
+        for parameter_symbol_i in parameter_symbols:
+            third_plane: list[list[Callable[..., np.ndarray]]] = []
+            for parameter_symbol_j in parameter_symbols:
+                third_row: list[Callable[..., np.ndarray]] = []
+                for parameter_symbol_k in parameter_symbols:
+                    third_expression = diff(expression, parameter_symbol_i, parameter_symbol_j, parameter_symbol_k)
+                    third_lambda = lambdify((x_symbol, *parameter_symbols), third_expression, modules="numpy")
+                    third_row.append(third_lambda)
+                third_plane.append(third_row)
+            third_lambdas.append(third_plane)
+
+        def gradient_function(x_data: np.ndarray, *parameters: float) -> np.ndarray:
+            return np.asarray([fn(x_data, *parameters) for fn in gradient_lambdas], dtype=float)
+
+        def hessian_function(x_data: np.ndarray, *parameters: float) -> np.ndarray:
+            return np.asarray(
+                [[fn(x_data, *parameters) for fn in row] for row in hessian_lambdas],
+                dtype=float,
+            )
+
+        def third_derivative_function(x_data: np.ndarray, *parameters: float) -> np.ndarray:
+            return np.asarray(
+                [
+                    [[fn(x_data, *parameters) for fn in row] for row in plane]
+                    for plane in third_lambdas
+                ],
+                dtype=float,
+            )
 
         derivative_registry = DerivativeFunctionRegistry(
             names=derivative_names,
             functions_by_name=derivative_functions_by_name,
             parameters_by_name=parameters_by_name,
+            gradient_function=gradient_function,
+            hessian_function=hessian_function,
+            third_derivative_function=third_derivative_function,
         )
         return model_function, derivative_registry
 
@@ -253,13 +382,18 @@ class FitService:
         x_numeric = np.asarray(x_values, dtype=float)
         y_numeric = np.asarray(y_values, dtype=float)
 
-        optimized_parameters, _ = curve_fit(
+        optimized_parameters, covariance = curve_fit(
             prepared_model.function,
             x_numeric,
             y_numeric,
             p0=prepared_model.initial_guess,
             maxfev=20000,
         )
+
+        fitted_on_data = np.asarray(prepared_model.function(x_numeric, *optimized_parameters), dtype=float)
+        residuals = y_numeric - fitted_on_data
+        dof = float(max(len(x_numeric) - len(optimized_parameters), 1))
+        residual_std = float(np.sqrt(max(np.sum(np.square(residuals)) / dof, 0.0)))
 
         # The fitted curve is evaluated on a sorted dense grid so overlays look
         # smooth even when the raw data arrives in an unsorted order.
@@ -274,6 +408,14 @@ class FitService:
             fitted_y=fitted_y,
             display_equation=prepared_model.display_equation,
             model_function=prepared_model.function,
+            gradient_function=prepared_model.gradient_function,
+            hessian_function=prepared_model.hessian_function,
+            third_derivative_function=prepared_model.third_derivative_function,
+            covariance=np.asarray(covariance, dtype=float),
+            residual_std=residual_std,
+            dof=dof,
+            fit_method="mle_curve_fit",
+            extras=None,
         )
 
     def _prepare_custom_model(
@@ -320,19 +462,20 @@ class FitService:
         else:
             parameter_symbols = discovered_parameter_symbols
 
-        lambda_function = lambdify((x_symbol, *parameter_symbols), expression, modules="numpy")
-
-        # A wrapper is required because SciPy expects the independent variable
-        # followed by a flat parameter list rather than a tuple of symbols.
-        def custom_function(x_data: np.ndarray, *parameters: float) -> np.ndarray:
-            return np.asarray(lambda_function(x_data, *parameters), dtype=float)
+        model_function, derivative_registry = self.build_custom_model_derivative_registry(
+            latex_expression,
+            [symbol.name for symbol in parameter_symbols],
+        )
 
         return PreparedModel(
             name="Custom LaTeX",
             parameter_names=[symbol.name for symbol in parameter_symbols],
-            function=custom_function,
+            function=model_function,
             display_equation=f"y = {latex_expression}",
             initial_guess=tuple(1.0 for _ in parameter_symbols),
+            gradient_function=derivative_registry.gradient_function,
+            hessian_function=derivative_registry.hessian_function,
+            third_derivative_function=derivative_registry.third_derivative_function,
         )
 
     def _parse_custom_expression(self, expression_text: str):

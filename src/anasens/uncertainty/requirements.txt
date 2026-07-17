@@ -1,0 +1,8 @@
+# Core numerical computing
+numpy>=2.0
+
+# Optimization, statistics, and probability distributions
+scipy>=1.14
+
+# Publication-quality plotting
+matplotlib>=3.9

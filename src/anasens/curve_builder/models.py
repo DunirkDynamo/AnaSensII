@@ -34,6 +34,9 @@ class FittingResult:
         fitted_y: Evaluated y values on fitted_x.
         display_equation: Equation string displayed in the statistics panel.
         model_function: Callable form of the fitted model.
+        gradient_function: Callable returning first derivatives with respect to parameters.
+        hessian_function: Callable returning second derivatives with respect to parameters.
+        third_derivative_function: Callable returning third derivatives with respect to parameters.
     """
 
     model_name: str
@@ -43,3 +46,11 @@ class FittingResult:
     fitted_y: np.ndarray
     display_equation: str
     model_function: Callable[..., np.ndarray]
+    gradient_function: Callable[..., np.ndarray] | None = None
+    hessian_function: Callable[..., np.ndarray] | None = None
+    third_derivative_function: Callable[..., np.ndarray] | None = None
+    covariance: np.ndarray | None = None
+    residual_std: float | None = None
+    dof: float | None = None
+    fit_method: str | None = None
+    extras: dict[str, object] | None = None

@@ -5,7 +5,10 @@ from __future__ import annotations
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
+from matplotlib import patheffects as pe
 from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+from anasens.uncertainty.bands import ConfidenceBand, PredictionBand
 
 from .models import FittingResult
 
@@ -39,6 +42,74 @@ class PlotRenderer:
 
         self._apply_base_style()
 
+        # Shared color tokens keep confidence/prediction overlays aligned with
+        # the rest of the curve-builder synthwave palette.
+        self._colors = {
+            "data_face": "#48e3ff",
+            "data_edge": "#ffd3f7",
+            "fit": "#ff5ac8",
+            "fit_glow": "#ff9de2",
+            "confidence_fill": "#3ed6ff",
+            "confidence_edge": "#9eeeff",
+            "prediction_fill": "#8b6dff",
+            "prediction_edge": "#cdbbff",
+            "text": "#f8f1ff",
+        }
+
+        self._confidence_styles = {
+            "delta": {
+                "fill": "#3ed6ff",
+                "edge": "#9eeeff",
+                "linestyle": "-",
+                "alpha": 0.18,
+            },
+            "monte_carlo": {
+                "fill": "#ff5ac8",
+                "edge": "#ffd3f7",
+                "linestyle": "--",
+                "alpha": 0.14,
+            },
+            "profile_likelihood": {
+                "fill": "#ffe27a",
+                "edge": "#fff0b3",
+                "linestyle": ":",
+                "alpha": 0.13,
+            },
+        }
+
+        self._prediction_styles = {
+            "exact_analytic": {
+                "fill": "#8b6dff",
+                "edge": "#cdbbff",
+                "linestyle": "--",
+                "alpha": 0.16,
+            },
+            "gaussian_analytic": {
+                "fill": "#8b6dff",
+                "edge": "#cdbbff",
+                "linestyle": "--",
+                "alpha": 0.16,
+            },
+            "delta": {
+                "fill": "#2ed4aa",
+                "edge": "#b8ffe8",
+                "linestyle": "-.",
+                "alpha": 0.14,
+            },
+            "monte_carlo": {
+                "fill": "#ff7a59",
+                "edge": "#ffd3c4",
+                "linestyle": ":",
+                "alpha": 0.12,
+            },
+            "quantile_regression": {
+                "fill": "#83d968",
+                "edge": "#dff7cf",
+                "linestyle": "-",
+                "alpha": 0.10,
+            },
+        }
+
     def plot_data(self, x_values, y_values, x_label: str, y_label: str) -> None:
         """Render the selected x and y columns.
 
@@ -68,8 +139,8 @@ class PlotRenderer:
             x_values,
             y_values,
             s=42,
-            color="#48e3ff",
-            edgecolors="#ffd3f7",
+            color=self._colors["data_face"],
+            edgecolors=self._colors["data_edge"],
             linewidths=1.0,
             alpha=0.98,
             zorder=3,
@@ -79,8 +150,8 @@ class PlotRenderer:
         self.axis.set_xlim(x_min, x_max)
         self.axis.set_ylim(y_min, y_max)
 
-        self.axis.set_xlabel(x_label, fontsize=12, fontweight="bold", color="#f8f1ff")
-        self.axis.set_ylabel(y_label, fontsize=12, fontweight="bold", color="#f8f1ff")
+        self.axis.set_xlabel(x_label, fontsize=12, fontweight="bold", color=self._colors["text"])
+        self.axis.set_ylabel(y_label, fontsize=12, fontweight="bold", color=self._colors["text"])
         self._style_legend()
         self.figure.tight_layout()
         self.canvas.draw_idle()
@@ -91,17 +162,169 @@ class PlotRenderer:
         Args:
             fitting_result: Result object containing the fitted curve data.
         """
-        self.axis.plot(
+        fit_line, = self.axis.plot(
             fitting_result.fitted_x,
             fitting_result.fitted_y,
-            color="#ff5ac8",
+            color=self._colors["fit"],
             linewidth=3.0,
             zorder=4,
             label=fitting_result.model_name,
         )
+        fit_line.set_path_effects(
+            [
+                pe.Stroke(linewidth=6.5, foreground=self._colors["fit_glow"], alpha=0.18),
+                pe.Normal(),
+            ]
+        )
         self._style_legend()
         self.figure.tight_layout()
         self.canvas.draw_idle()
+
+    def overlay_bands(
+        self,
+        confidence_band: ConfidenceBand | None,
+        prediction_band: PredictionBand | None,
+    ) -> None:
+        """Overlay confidence and prediction bands on the active plot."""
+        if prediction_band is not None:
+            self.overlay_prediction_band(prediction_band)
+
+        if confidence_band is not None:
+            self.overlay_confidence_bands({confidence_band.method: confidence_band})
+
+        self._style_legend()
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def overlay_prediction_band(self, prediction_band: PredictionBand, method_key: str | None = None) -> None:
+        """Overlay one prediction band on the active plot."""
+        if prediction_band is not None:
+            method = self._normalize_method_key(method_key or prediction_band.method)
+            style = self._prediction_styles.get(
+                method,
+                {
+                    "fill": self._colors["prediction_fill"],
+                    "edge": self._colors["prediction_edge"],
+                    "linestyle": "--",
+                    "alpha": 0.16,
+                },
+            )
+            self.axis.plot(
+                prediction_band.x_grid,
+                prediction_band.lower_values,
+                color=style["edge"],
+                linewidth=1.35,
+                alpha=0.9,
+                linestyle="--",
+                zorder=2.4,
+                label=f"{self._prediction_method_label(method)} ({int((1.0 - prediction_band.alpha) * 100)}% PI)",
+            )
+            self.axis.plot(
+                prediction_band.x_grid,
+                prediction_band.upper_values,
+                color=style["edge"],
+                linewidth=1.35,
+                alpha=0.9,
+                linestyle="--",
+                zorder=2.4,
+                label="_nolegend_",
+            )
+
+    def overlay_prediction_bands(self, prediction_bands: dict[str, PredictionBand]) -> None:
+        """Overlay one or more prediction bands on the active plot."""
+        for method_key, prediction_band in prediction_bands.items():
+            self.overlay_prediction_band(prediction_band, method_key=method_key)
+
+    def overlay_profile_prediction_map(self, profile_map: dict[str, np.ndarray]) -> None:
+        """Overlay modified profile-likelihood PI map as x-bounds over y-grid."""
+        y_grid = profile_map["y_grid"]
+        x_mle = profile_map["x_mle"]
+        x_lower = profile_map["x_lower"]
+        x_upper = profile_map["x_upper"]
+
+        self.axis.plot(
+            x_mle,
+            y_grid,
+            color="#ffe27a",
+            linewidth=1.6,
+            alpha=0.9,
+            label="Profile Likelihood Modified (MLE)",
+            zorder=2.5,
+        )
+        self.axis.plot(
+            x_lower,
+            y_grid,
+            color="#fff0b3",
+            linewidth=1.1,
+            linestyle="--",
+            alpha=0.85,
+            label="_nolegend_",
+            zorder=2.45,
+        )
+        self.axis.plot(
+            x_upper,
+            y_grid,
+            color="#fff0b3",
+            linewidth=1.1,
+            linestyle="--",
+            alpha=0.85,
+            label="Profile Likelihood Modified",
+            zorder=2.45,
+        )
+        self.axis.fill_betweenx(
+            y_grid,
+            x_lower,
+            x_upper,
+            color="#ffe27a",
+            alpha=0.06,
+            zorder=2.35,
+            label="_nolegend_",
+        )
+
+    def overlay_confidence_bands(self, confidence_bands: dict[str, ConfidenceBand]) -> None:
+        """Overlay one or more confidence bands on the active plot."""
+        for index, (method_key, confidence_band) in enumerate(confidence_bands.items()):
+            style = self._confidence_styles.get(
+                self._normalize_method_key(method_key),
+                {
+                    "fill": "#48e3ff",
+                    "edge": "#f8f1ff",
+                    "linestyle": "-.",
+                    "alpha": 0.14,
+                },
+            )
+            zorder = 2.0 + index * 0.08
+            label = f"{self._confidence_method_label(method_key)} ({int((1.0 - confidence_band.alpha) * 100)}% CI)"
+
+            self.axis.fill_between(
+                confidence_band.x_grid,
+                confidence_band.lower_values,
+                confidence_band.upper_values,
+                color=style["fill"],
+                alpha=style["alpha"],
+                zorder=zorder,
+                label=label,
+            )
+            self.axis.plot(
+                confidence_band.x_grid,
+                confidence_band.lower_values,
+                color=style["edge"],
+                linewidth=1.2,
+                alpha=0.8,
+                linestyle=style["linestyle"],
+                zorder=zorder + 0.1,
+                label="_nolegend_",
+            )
+            self.axis.plot(
+                confidence_band.x_grid,
+                confidence_band.upper_values,
+                color=style["edge"],
+                linewidth=1.2,
+                alpha=0.8,
+                linestyle=style["linestyle"],
+                zorder=zorder + 0.1,
+                label="_nolegend_",
+            )
 
     def _draw_backdrop(self, x_min: float, x_max: float, y_min: float, y_max: float) -> None:
         """Paint a synthwave-style backdrop inside the plotting area.
@@ -179,6 +402,33 @@ class PlotRenderer:
         title.set_fontweight("bold")
         for text in legend.get_texts():
             text.set_color("#f8f1ff")
+
+    def _normalize_method_key(self, method_key: str) -> str:
+        return method_key.strip().lower()
+
+    def _confidence_method_label(self, method_key: str) -> str:
+        normalized_key = self._normalize_method_key(method_key)
+        if normalized_key.startswith("delta"):
+            return "Delta Method"
+        if normalized_key == "monte_carlo":
+            return "Monte Carlo"
+        if normalized_key == "profile_likelihood":
+            return "Profile Likelihood"
+        return method_key.replace("_", " ").title()
+
+    def _prediction_method_label(self, method_key: str) -> str:
+        normalized_key = self._normalize_method_key(method_key)
+        if normalized_key in {"exact_analytic", "gaussian_analytic"}:
+            return "Exact Analytical"
+        if normalized_key == "delta":
+            return "Delta Method"
+        if normalized_key == "monte_carlo":
+            return "Monte Carlo"
+        if normalized_key == "quantile_regression":
+            return "Quantile Regression"
+        if normalized_key == "profile_likelihood_modified":
+            return "Profile Likelihood Modified"
+        return method_key.replace("_", " ").title()
 
     def _apply_base_style(self) -> None:
         """Apply consistent plot styling to the managed axis."""
