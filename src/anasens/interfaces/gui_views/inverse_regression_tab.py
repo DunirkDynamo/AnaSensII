@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
@@ -13,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QDialog,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -112,6 +116,11 @@ class InverseRegressionTab(QWidget):
         run_btn.clicked.connect(self._run_estimation)
         controls_layout.addWidget(run_btn)
 
+        self._show_plots_btn = QPushButton("Show inverse-band plots")
+        self._show_plots_btn.clicked.connect(self._show_inverse_band_plots)
+        self._show_plots_btn.setEnabled(False)
+        controls_layout.addWidget(self._show_plots_btn)
+
         export_btn = QPushButton("Export Results to CSV")
         export_btn.clicked.connect(self._export_results)
         controls_layout.addWidget(export_btn)
@@ -197,6 +206,7 @@ class InverseRegressionTab(QWidget):
             self._standard_curve = load_standard_curve(Path(path))
             self._curve_status.setText(f"Loaded: {Path(path).name}")
             self._log_message(f"Standard curve loaded from: {path}")
+            self._show_plots_btn.setEnabled(True)
         except Exception as exc:
             QMessageBox.critical(self, "Load failed", str(exc))
 
@@ -229,6 +239,7 @@ class InverseRegressionTab(QWidget):
             self._log_message(
                 f"Estimation complete: {rows} estimates | method={regression_type} | metric={metric}"
             )
+            self._show_plots_btn.setEnabled(True)
         except Exception as exc:
             QMessageBox.critical(self, "Estimation failed", str(exc))
 
@@ -260,3 +271,125 @@ class InverseRegressionTab(QWidget):
             QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+
+    def _show_inverse_band_plots(self) -> None:
+        """Show the inverse calibration and resolution plots in a scrollable dialog.
+
+        Purpose:
+            Render the prediction-band inverse curves in a wide viewport with a
+            horizontal scrollbar so the figure can remain publication-sized.
+
+        Inputs:
+            None. The method uses the currently loaded standard curve.
+
+        Output:
+            None. A non-modal dialog is created and shown.
+        """
+        if self._standard_curve is None:
+            QMessageBox.warning(self, "No curve", "Load a standard curve file first.")
+            return
+
+        try:
+            # Use prediction-band inversion because the inverse calibration plot
+            # is defined on observation uncertainty, not the fitted mean CI.
+            band_data = self._standard_curve.inverse_band_curve(band="prediction")
+        except Exception as exc:
+            QMessageBox.critical(self, "Plot failed", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Inverse Calibration and Resolution")
+        dialog.resize(1280, 760)
+        dialog.setModal(False)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        # Use a wide figure so the dialog can scroll horizontally instead of
+        # compressing the content into a cramped viewport.
+        figure = Figure(figsize=(18.0, 6.2), dpi=150, facecolor="#0c0820")
+        canvas = FigureCanvasQTAgg(figure)
+        canvas.setMinimumWidth(1750)
+        canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        plot_host = QWidget()
+        plot_layout = QVBoxLayout(plot_host)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.addWidget(canvas)
+
+        plot_scroll = QScrollArea()
+        plot_scroll.setWidgetResizable(True)
+        plot_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        plot_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        plot_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        plot_scroll.setWidget(plot_host)
+        layout.addWidget(plot_scroll)
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+        x_grid = band_data["x_grid"]
+        y_grid = band_data["y_grid"]
+        x_mle = band_data["x_mle"]
+        x_lower = band_data["x_lower"]
+        x_upper = band_data["x_upper"]
+        resolution = band_data["resolution"]
+        valid = np.isfinite(x_mle) & np.isfinite(x_lower) & np.isfinite(x_upper) & np.isfinite(resolution)
+
+        figure.clear()
+        ax1 = figure.add_subplot(111)
+        ax2 = ax1.twinx()
+
+        for axis in (ax1, ax2):
+            axis.set_facecolor("#f8f7fb")
+            axis.tick_params(axis="both", which="major", labelsize=10, length=6, width=1.1, direction="out")
+            axis.tick_params(axis="both", which="minor", labelsize=9, length=3, width=0.9, direction="out")
+            for spine in axis.spines.values():
+                spine.set_linewidth(1.1)
+                spine.set_color("#1c1c1c")
+
+        ax1.plot(y_grid, x_mle, color="#111111", linewidth=2.4, label=r"MLE point estimate $\hat{x}_0(y_0)$")
+        ax1.plot(y_grid, x_lower, color="#2f3b4c", linestyle="--", linewidth=1.9, label=r"Confidence Interval Limits")
+        ax1.plot(y_grid, x_upper, color="#2f3b4c", linestyle="--", linewidth=1.9, label="_nolegend_")
+        ax1.fill_between(y_grid, x_lower, x_upper, color="#1f77b4", alpha=0.14, label="Prediction uncertainty band")
+        ax1.set_title("Inverse Calibration and Resolution", fontsize=15, pad=12, fontweight="semibold")
+        ax1.set_xlabel(r"Hypothetical Measurement Observation ($y_0$)", fontsize=13, labelpad=8)
+        ax1.set_ylabel(r"Inferred Parameter Estimate ($x_0$)", fontsize=13, labelpad=8)
+        ax1.minorticks_on()
+        ax1.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.18)
+        ax1.grid(True, which="minor", linestyle=":", linewidth=0.4, alpha=0.12)
+
+        ax2.plot(
+            x_mle[valid],
+            resolution[valid],
+            color="darkmagenta",
+            linewidth=2.8,
+            label=r"Relative width: $\frac{x_0^{\mathrm{upper}} - x_0^{\mathrm{lower}}}{\hat{x}_0}$",
+        )
+        ax2.set_ylabel("Resolution", fontsize=13, labelpad=8)
+        ax2.minorticks_on()
+        ax2.grid(False)
+
+        handles1, labels1 = ax1.get_legend_handles_labels()
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(
+            handles1 + handles2,
+            labels1 + labels2,
+            loc="upper left",
+            frameon=True,
+            facecolor="white",
+            framealpha=0.95,
+            fontsize=10,
+            borderpad=0.7,
+        )
+
+        figure.tight_layout(pad=1.4)
+        canvas.draw_idle()
+
+        dialog.show()
+        self._plot_dialog = dialog

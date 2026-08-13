@@ -15,7 +15,7 @@ model mean. It is not used for prediction intervals.
 from __future__ import annotations
 
 import numpy as np
-from scipy.optimize import minimize
+from scipy.optimize import brentq, minimize
 from scipy.stats import chi2
 
 from ..bands.confidence_band import ConfidenceBand
@@ -142,6 +142,7 @@ class ProfileLikelihoodCI:
             method=self.optimizer_method,
             bounds=self.bounds,
             constraints={"type": "eq", "fun": constraint},
+            options={"ftol": 1e-8},
         )
 
         if not result.success:
@@ -152,7 +153,83 @@ class ProfileLikelihoodCI:
 
         return -float(result.fun)
 
-    def interval(self, x, q_grid, alpha=0.05):
+    def _expand_bracket(self, objective, center: float, direction: float, initial_span: float, max_expand: int = 12) -> tuple[float, float]:
+        """Expand a one-sided bracket until the profile threshold is crossed."""
+        span = max(float(initial_span), 1e-9)
+        left = float(center)
+        left_value = float(objective(left))
+
+        if np.isclose(left_value, 0.0):
+            return left, left
+
+        for _ in range(max_expand):
+            candidate = left + direction * span
+            candidate_value = float(objective(candidate))
+
+            if np.isnan(candidate_value) or np.isinf(candidate_value):
+                span *= 2.0
+                continue
+
+            if left_value * candidate_value <= 0.0:
+                return (min(left, candidate), max(left, candidate))
+
+            left = candidate
+            left_value = candidate_value
+            span *= 2.0
+
+        raise RuntimeError("Unable to bracket a profile-likelihood root.")
+
+    def _expand_from_previous(self, objective, previous_root: float, direction: float, initial_span: float, max_expand: int = 12) -> tuple[float, float]:
+        """Expand a bracket using the previous root as the anchored endpoint."""
+        span = max(float(initial_span), 1e-9)
+        left = float(previous_root)
+        left_value = float(objective(left))
+
+        if np.isclose(left_value, 0.0):
+            return left, left
+
+        for _ in range(max_expand):
+            candidate = left + direction * span
+            candidate_value = float(objective(candidate))
+
+            if np.isnan(candidate_value) or np.isinf(candidate_value):
+                span *= 2.0
+                continue
+
+            if left_value * candidate_value <= 0.0:
+                return (min(left, candidate), max(left, candidate))
+
+            left = candidate
+            left_value = candidate_value
+            span *= 2.0
+
+        raise RuntimeError("Unable to bracket a profile-likelihood root from the previous solution.")
+
+    def _expand_with_fallback(
+        self,
+        objective,
+        previous_root: float,
+        center: float,
+        direction: float,
+        initial_span: float,
+        fallback_span: float,
+    ) -> tuple[float, float]:
+        try:
+            return self._expand_from_previous(
+                objective,
+                previous_root=previous_root,
+                direction=direction,
+                initial_span=initial_span,
+            )
+        except RuntimeError:
+            return self._expand_bracket(
+                objective,
+                center=center,
+                direction=direction,
+                initial_span=fallback_span,
+            )
+
+    def interval(self, x, alpha=0.05):
         """
         Compute a profile-likelihood confidence interval at one x.
 
@@ -160,12 +237,6 @@ class ProfileLikelihoodCI:
         ----------
         x : float
             Input location.
-
-        q_grid : array-like
-            Candidate model values to scan.
-
-            The returned interval is limited by this grid. Use a sufficiently
-            wide and fine grid for accurate results.
 
         alpha : float, optional
             Significance level.
@@ -177,46 +248,51 @@ class ProfileLikelihoodCI:
 
         Notes
         -----
-        This method evaluates the profile likelihood over ``q_grid`` and
-        returns the smallest and largest accepted values according to
-        Wilks' theorem.
+        This method solves for the lower and upper q values directly using
+        Wilks' theorem and one-dimensional root finding.
         """
         self._validate_alpha(alpha)
-
-        q_grid = np.asarray(q_grid, dtype=float)
-
-        if q_grid.ndim != 1:
-            raise ValueError("q_grid must be one-dimensional.")
-
-        if q_grid.size < 2:
-            raise ValueError("q_grid must contain at least two values.")
 
         # Wilks threshold for a one-dimensional parameter of interest.
         cutoff = chi2.ppf(1.0 - alpha, df=1) / 2.0
 
         # Global maximum log-likelihood at the MLE.
         max_loglik = self.loglik(self.theta_hat)
+        target_loglik = max_loglik - cutoff
 
-        profile_values = np.zeros_like(q_grid, dtype=float)
+        mean_q = float(self.model(x, self.theta_hat))
+        center_value = self.profile_loglik(x, mean_q) - target_loglik
+        if center_value < 0.0:
+            raise RuntimeError("Profile likelihood at the fitted mean is below the Wilks threshold.")
 
-        for i, q in enumerate(q_grid):
-            profile_values[i] = self.profile_loglik(x, q)
+        y_span = max(abs(mean_q) * 0.25, 1.0)
 
-        # Accept all q values whose likelihood-ratio statistic falls within
-        # the Wilks threshold.
-        accepted = profile_values >= (max_loglik - cutoff)
+        def objective(q: float) -> float:
+            return self.profile_loglik(x, q) - target_loglik
 
-        if not np.any(accepted):
-            raise RuntimeError(
-                "No q values satisfied the Wilks threshold. "
-                "Try widening q_grid."
-            )
+        lower_bounds = self._expand_with_fallback(
+            objective,
+            previous_root=mean_q,
+            center=mean_q,
+            direction=-1.0,
+            initial_span=y_span,
+            fallback_span=max(y_span, abs(mean_q) * 0.5 + 1.0),
+        )
+        upper_bounds = self._expand_with_fallback(
+            objective,
+            previous_root=mean_q,
+            center=mean_q,
+            direction=1.0,
+            initial_span=y_span,
+            fallback_span=max(y_span, abs(mean_q) * 0.5 + 1.0),
+        )
 
-        accepted_q = q_grid[accepted]
+        lower = brentq(objective, lower_bounds[0], lower_bounds[1], xtol=1e-6)
+        upper = brentq(objective, upper_bounds[0], upper_bounds[1], xtol=1e-6)
 
-        return float(np.min(accepted_q)), float(np.max(accepted_q))
+        return float(lower), float(upper)
 
-    def band(self, x_grid, q_grid, alpha=0.05):
+    def band(self, x_grid, alpha=0.05):
         """
         Construct a profile-likelihood confidence band.
 
@@ -224,9 +300,6 @@ class ProfileLikelihoodCI:
         ----------
         x_grid : array-like
             Grid of x values at which confidence limits are computed.
-
-        q_grid : array-like
-            Candidate model values scanned at each x.
 
         alpha : float, optional
             Significance level.
@@ -249,12 +322,7 @@ class ProfileLikelihoodCI:
             # Fitted model mean at the MLE.
             mean[i] = self.model(x, self.theta_hat)
 
-            # Profile-likelihood confidence interval for this x.
-            lower[i], upper[i] = self.interval(
-                x=x,
-                q_grid=q_grid,
-                alpha=alpha,
-            )
+            lower[i], upper[i] = self.interval(x=x, alpha=alpha)
 
         return ConfidenceBand(
             x_grid=x_grid,

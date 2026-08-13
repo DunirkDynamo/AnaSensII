@@ -7,9 +7,11 @@ from dataclasses import dataclass, field
 import re
 
 import numpy as np
+from scipy.optimize import minimize
+from scipy.stats import norm, t
 
 from .models import FittingResult
-from anasens.uncertainty.bands import ConfidenceBand, PredictionBand
+from anasens.uncertainty.bands import ConfidenceBand, PredictionBand, ProfileLikelihoodBand
 from anasens.uncertainty.error_models import (
     GaussianError,
     HyperbolicSecantError,
@@ -19,10 +21,8 @@ from anasens.uncertainty.error_models import (
     StudentTError,
 )
 from anasens.uncertainty.intervals import DeltaMethod, MonteCarloCI, ProfileLikelihoodCI
-from anasens.uncertainty.prediction import (
-    MonteCarloPrediction,
-    profile_likelihood_modified_map,
-)
+from anasens.uncertainty.prediction import MonteCarloPrediction
+from anasens.uncertainty.prediction.profile_likelihood_general import profile_likelihood_prediction_band
 
 
 @dataclass(slots=True)
@@ -38,7 +38,7 @@ class BandComputationResult:
     sigma: float
     confidence_errors: dict[str, str] = field(default_factory=dict)
     prediction_errors: dict[str, str] = field(default_factory=dict)
-    profile_prediction_maps: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
+    profile_prediction_maps: dict[str, ProfileLikelihoodBand] = field(default_factory=dict)
 
     @property
     def confidence_band(self) -> ConfidenceBand | None:
@@ -93,7 +93,7 @@ class BandService:
         prediction_monte_carlo_samples: int = 3000,
         prediction_delta_samples: int = 2500,
         profile_grid_points: int = 121,
-        profile_y_points: int = 35,
+        profile_y_points: int = 20,
         monte_carlo_mode: str = "parametric",
     ) -> BandComputationResult:
         """Build selected confidence and prediction intervals for a fitted model."""
@@ -161,7 +161,7 @@ class BandService:
 
         prediction_bands: dict[str, PredictionBand] = {}
         prediction_errors: dict[str, str] = {}
-        profile_prediction_maps: dict[str, dict[str, np.ndarray]] = {}
+        profile_prediction_maps: dict[str, ProfileLikelihoodBand] = {}
 
         for method in selected_prediction_methods:
             try:
@@ -274,20 +274,11 @@ class BandService:
 
         if method_key == "profile_likelihood":
             loglik = self._build_gaussian_loglik_function(x_numeric, y_numeric, model, sigma)
-            q_grid = self._build_profile_q_grid(
-                model=model,
-                theta_hat=theta_hat,
-                covariance=covariance,
-                gradient=grad,
-                x_grid=x_grid,
-                sigma=sigma,
-                profile_grid_points=profile_grid_points,
-            )
             return ProfileLikelihoodCI(
                 model=model,
                 loglik=loglik,
                 theta_hat=theta_hat,
-            ).band(x_grid=x_grid, q_grid=q_grid, alpha=alpha)
+            ).band(x_grid=x_grid, alpha=alpha)
 
         raise ValueError(
             "Unsupported confidence method: "
@@ -316,14 +307,8 @@ class BandService:
         profile_y_points: int,
         monte_carlo_mode: str,
         residuals: np.ndarray,
-    ) -> tuple[PredictionBand | None, dict[str, np.ndarray] | None]:
+    ) -> tuple[PredictionBand | None, ProfileLikelihoodBand | None]:
         method_key = method.strip().lower()
-
-        if self._is_quantile_fit(fitting_result):
-            if method_key != "quantile_regression":
-                raise ValueError("Quantile fit mode supports only quantile_regression PI.")
-            band = self._quantile_prediction_band_from_fit(fitting_result, x_grid, alpha)
-            return band, None
 
         if method_key in {"exact_analytic", "gaussian_analytic"}:
             if polynomial_degree is None:
@@ -349,6 +334,9 @@ class BandService:
             return band, None
 
         if method_key == "delta":
+            if error_model_name.strip().lower() != "gaussian":
+                raise ValueError("Delta prediction intervals require a Gaussian error model.")
+
             band = self._delta_prediction_band(
                 model=model,
                 theta_hat=theta_hat,
@@ -357,7 +345,7 @@ class BandService:
                 error_model=error_model,
                 x_grid=x_grid,
                 alpha=alpha,
-                n_samples=prediction_delta_samples,
+                dof=int(dof),
             )
             return band, None
 
@@ -394,25 +382,35 @@ class BandService:
             return band, None
 
         if method_key == "quantile_regression":
-            raise ValueError(
-                "Quantile-regression PI requires selecting quantile fit type so quantiles are fitted once during model fit."
+            if self._is_quantile_fit(fitting_result):
+                band = self._quantile_prediction_band_from_fit(fitting_result, x_grid, alpha)
+                return band, None
+
+            band = self._quantile_prediction_band_from_model(
+                fitting_result=fitting_result,
+                model=model,
+                x_numeric=x_numeric,
+                y_numeric=y_numeric,
+                x_grid=x_grid,
+                alpha=alpha,
             )
+            return band, None
 
         if method_key in {"profile_likelihood_modified", "profile_likelihood"}:
-            if polynomial_degree is None:
-                raise ValueError("Modified profile-likelihood PI is currently available only for polynomial fits.")
-            profile_map = profile_likelihood_modified_map(
-                x_cal=x_numeric,
-                y_cal=y_numeric,
-                degree=polynomial_degree,
+            result = profile_likelihood_prediction_band(
+                fitting_result=fitting_result,
+                x_values=x_numeric,
+                y_values=y_numeric,
+                x_grid=x_grid,
                 confidence=1.0 - float(alpha),
                 n_y_points=profile_y_points,
+                generate_inverse_map=False,
             )
-            return None, profile_map
+            return result.band, None
 
         raise ValueError(
             "Unsupported prediction method: "
-            f"{method}. Supported methods are exact_analytic, delta, monte_carlo, profile_likelihood_modified, and quantile_regression."
+            f"{method}. Supported methods are exact_analytic, delta, monte_carlo, profile_likelihood, profile_likelihood_modified, and quantile_regression."
         )
 
     def _is_quantile_fit(self, fitting_result: FittingResult) -> bool:
@@ -448,6 +446,85 @@ class BandService:
             alpha=alpha,
             method="quantile_regression",
         )
+
+    def _quantile_prediction_band_from_model(
+        self,
+        fitting_result: FittingResult,
+        model,
+        x_numeric: np.ndarray,
+        y_numeric: np.ndarray,
+        x_grid: np.ndarray,
+        alpha: float,
+    ) -> PredictionBand:
+        theta_start = np.asarray(fitting_result.parameter_values, dtype=float)
+        lower_q = alpha / 2.0
+        upper_q = 1.0 - alpha / 2.0
+
+        lower_theta = self._fit_quantile_parameters(
+            model=model,
+            x_numeric=x_numeric,
+            y_numeric=y_numeric,
+            theta_start=theta_start,
+            quantile=lower_q,
+        )
+        median_theta = self._fit_quantile_parameters(
+            model=model,
+            x_numeric=x_numeric,
+            y_numeric=y_numeric,
+            theta_start=theta_start,
+            quantile=0.5,
+        )
+        upper_theta = self._fit_quantile_parameters(
+            model=model,
+            x_numeric=x_numeric,
+            y_numeric=y_numeric,
+            theta_start=theta_start,
+            quantile=upper_q,
+        )
+
+        mean = np.asarray(model(x_grid, median_theta), dtype=float)
+        lower = np.asarray(model(x_grid, lower_theta), dtype=float)
+        upper = np.asarray(model(x_grid, upper_theta), dtype=float)
+
+        return PredictionBand(
+            x_grid=x_grid,
+            mean=mean,
+            lower=lower,
+            upper=upper,
+            alpha=alpha,
+            method="quantile_regression",
+        )
+
+    def _fit_quantile_parameters(
+        self,
+        model,
+        x_numeric: np.ndarray,
+        y_numeric: np.ndarray,
+        theta_start: np.ndarray,
+        quantile: float,
+    ) -> np.ndarray:
+        quantile = float(np.clip(quantile, 1e-6, 1.0 - 1e-6))
+        x_numeric = np.asarray(x_numeric, dtype=float)
+        y_numeric = np.asarray(y_numeric, dtype=float)
+        theta_start = np.asarray(theta_start, dtype=float)
+
+        def objective(theta: np.ndarray) -> float:
+            theta = np.asarray(theta, dtype=float)
+            predictions = np.asarray(model(x_numeric, theta), dtype=float)
+            residuals = y_numeric - predictions
+            loss = np.where(residuals >= 0.0, quantile * residuals, (quantile - 1.0) * residuals)
+            return float(np.sum(loss))
+
+        result = minimize(
+            objective,
+            theta_start,
+            method="L-BFGS-B",
+            options={"gtol": 5e-4, "ftol": 1e-8, "maxiter": 2000},
+        )
+        if not result.success:
+            raise RuntimeError(f"Quantile regression failed: {result.message}")
+
+        return np.asarray(result.x, dtype=float)
 
     def _exact_prediction_band_from_fit(
         self,
@@ -539,11 +616,11 @@ class BandService:
         error_model,
         x_grid: np.ndarray,
         alpha: float,
-        n_samples: int,
+        dof: int,
     ) -> PredictionBand:
-        # This is a direct convolution implementation of first-order delta
-        # uncertainty with the selected additive error model.
-        rng = np.random.default_rng(42)
+        # This is the exact first-order delta-method prediction band for an
+        # additive Gaussian error model: model variance plus observation noise.
+        critical = float(t.ppf(1.0 - alpha / 2.0, df=max(int(dof), 1))) if dof else float(norm.ppf(1.0 - alpha / 2.0))
         means = np.zeros_like(x_grid, dtype=float)
         lowers = np.zeros_like(x_grid, dtype=float)
         uppers = np.zeros_like(x_grid, dtype=float)
@@ -552,18 +629,12 @@ class BandService:
             mu = float(model(float(x_value), theta_hat))
             grad_vec = np.asarray(gradient(float(x_value), theta_hat), dtype=float)
             var_mean = float(grad_vec @ covariance @ grad_vec)
-            std_mean = float(np.sqrt(max(var_mean, 0.0)))
-
-            sampled_means = rng.normal(loc=mu, scale=std_mean, size=n_samples)
-            sampled_noise = np.asarray(
-                [error_model.sample(float(x_value), rng) for _ in range(n_samples)],
-                dtype=float,
-            )
-            sampled_y = sampled_means + sampled_noise
+            var_pred = max(var_mean, 0.0) + float(error_model.sigma) ** 2
+            std_pred = float(np.sqrt(max(var_pred, 0.0)))
 
             means[index] = mu
-            lowers[index] = float(np.quantile(sampled_y, alpha / 2.0))
-            uppers[index] = float(np.quantile(sampled_y, 1.0 - alpha / 2.0))
+            lowers[index] = mu - critical * std_pred
+            uppers[index] = mu + critical * std_pred
 
         return PredictionBand(
             x_grid=x_grid,

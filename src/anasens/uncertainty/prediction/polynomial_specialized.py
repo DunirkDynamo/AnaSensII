@@ -51,7 +51,13 @@ class GeneralizedInverseProfileCalibration:
         init_sigma_sq = np.var(self.y_cal - self._evaluate_poly(self.x_cal, self.beta_init))
         init_params = list(self.beta_init) + [init_sigma_sq]
 
-        res = minimize(self._joint_neg_log_lik, init_params, args=(x_0, y_0), method="Nelder-Mead")
+        res = minimize(
+            self._joint_neg_log_lik,
+            init_params,
+            args=(x_0, y_0),
+            method="L-BFGS-B",
+            options={"gtol": 5e-4, "ftol": 1e-8},
+        )
         if not res.success:
             raise ValueError(f"Profile likelihood optimization failed: {res.message}")
         return -res.fun
@@ -72,7 +78,12 @@ class GeneralizedInverseProfileCalibration:
 
         init_all = list(self.beta_init) + [init_sigma_sq, x_0_init]
 
-        global_res = minimize(obj, init_all, method="Nelder-Mead")
+        global_res = minimize(
+            obj,
+            init_all,
+            method="L-BFGS-B",
+            options={"gtol": 5e-4, "ftol": 1e-8},
+        )
         if not global_res.success:
             raise ValueError(f"Global profile optimization failed: {global_res.message}")
 

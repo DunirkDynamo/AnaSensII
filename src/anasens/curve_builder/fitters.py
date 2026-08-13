@@ -8,7 +8,6 @@ import re
 
 import numpy as np
 from scipy.optimize import curve_fit
-import statsmodels.api as sm
 from sympy import Symbol, diff, lambdify
 from sympy.parsing.sympy_parser import (
     convert_xor,
@@ -159,84 +158,6 @@ class FitService:
         """
         prepared_model = self._prepare_custom_model(latex_expression, parameter_names)
         return self._fit_model(x_values, y_values, prepared_model)
-
-    def fit_quantile_polynomial(
-        self,
-        x_values: np.ndarray,
-        y_values: np.ndarray,
-        order: int,
-        coverage: float = 0.95,
-    ) -> FittingResult:
-        """Fit polynomial quantile regression with median as the model curve.
-
-        The returned model is the median quantile (q=0.5), and prediction
-        interval bounds are represented by symmetric quantiles derived from
-        the requested coverage.
-        """
-        if order < 1:
-            raise ValueError("Polynomial order must be at least 1.")
-        if not (0.0 < coverage < 1.0):
-            raise ValueError("coverage must satisfy 0 < coverage < 1.")
-
-        x_numeric = np.asarray(x_values, dtype=float)
-        y_numeric = np.asarray(y_values, dtype=float)
-        degree = int(order)
-        alpha = 1.0 - float(coverage)
-        lower_q = alpha / 2.0
-        upper_q = 1.0 - alpha / 2.0
-
-        design = np.vander(x_numeric, degree + 1, increasing=True)
-
-        lower_model = sm.QuantReg(y_numeric, design)
-        median_model = sm.QuantReg(y_numeric, design)
-        upper_model = sm.QuantReg(y_numeric, design)
-
-        lower_result = lower_model.fit(q=lower_q, method="interior")
-        median_result = median_model.fit(q=0.5, method="interior")
-        upper_result = upper_model.fit(q=upper_q, method="interior")
-
-        beta_lower = np.asarray(lower_result.params, dtype=float)
-        beta_median = np.asarray(median_result.params, dtype=float)
-        beta_upper = np.asarray(upper_result.params, dtype=float)
-
-        def eval_poly(x_data: np.ndarray, beta: np.ndarray) -> np.ndarray:
-            x_array = np.asarray(x_data, dtype=float)
-            return sum(b * np.power(x_array, idx) for idx, b in enumerate(beta))
-
-        def median_model_function(x_data: np.ndarray, *parameters: float) -> np.ndarray:
-            params = np.asarray(parameters, dtype=float)
-            return eval_poly(np.asarray(x_data, dtype=float), params)
-
-        fitted_x = np.linspace(np.min(x_numeric), np.max(x_numeric), 400)
-        fitted_y = eval_poly(fitted_x, beta_median)
-        fitted_on_data = eval_poly(x_numeric, beta_median)
-        residuals = y_numeric - fitted_on_data
-        dof = float(max(len(x_numeric) - len(beta_median), 1))
-        residual_std = float(np.sqrt(max(np.sum(np.square(residuals)) / dof, 0.0)))
-
-        parameter_names = [f"a{i}" for i in range(degree + 1)]
-
-        return FittingResult(
-            model_name=f"Quantile regression (poly order {degree}, median)",
-            parameter_names=parameter_names,
-            parameter_values=beta_median,
-            fitted_x=fitted_x,
-            fitted_y=fitted_y,
-            display_equation=self._build_polynomial_equation(order),
-            model_function=median_model_function,
-            covariance=None,
-            residual_std=residual_std,
-            dof=dof,
-            fit_method="quantile_regression",
-            extras={
-                "degree": degree,
-                "coverage": float(coverage),
-                "quantiles": (lower_q, 0.5, upper_q),
-                "beta_lower": beta_lower,
-                "beta_median": beta_median,
-                "beta_upper": beta_upper,
-            },
-        )
 
     def build_custom_model_and_derivatives(
         self,
@@ -415,7 +336,7 @@ class FitService:
             residual_std=residual_std,
             dof=dof,
             fit_method="mle_curve_fit",
-            extras=None,
+            extras={"residuals": residuals},
         )
 
     def _prepare_custom_model(

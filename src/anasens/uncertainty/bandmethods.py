@@ -403,7 +403,8 @@ class ProfileLikelihoodEngine:
             objective,
             self.theta_hat,
             constraints={'type': 'eq', 'fun': constraint},
-            bounds=bounds
+            bounds=bounds,
+            options={'ftol': 1e-8}
         )
 
         return -res.fun

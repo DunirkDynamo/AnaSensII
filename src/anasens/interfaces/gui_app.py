@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from anasens.interfaces.gui_views.curve_builder_tab import CurveBuilderTab
+from anasens.interfaces.gui_views.explore_tab import ExploreTab
 from anasens.interfaces.gui_views.inverse_estimation_tab import InverseEstimationTab
 from anasens.interfaces.gui_views.pipeline_tab import PipelineRunRequest, PipelineTab
 from anasens.interfaces.gui_views.calibrator_tab import CalibratorTab
@@ -238,11 +239,13 @@ class AnaSensWindow(QMainWindow):
 
         self.tabs = QTabWidget(tab_card)
         self.pipeline_tab = PipelineTab(self.tabs)
+        self.explore_tab = ExploreTab(self.tabs)
         self.curve_tab = CurveBuilderTab(self.tabs)
         self.inverse_tab = InverseEstimationTab(self.tabs)
         self.calibrator_tab = CalibratorTab(self.tabs)
 
         self.tabs.addTab(self.pipeline_tab, "Pipeline")
+        self.tabs.addTab(self.explore_tab, "Explore")
         self.tabs.addTab(self.curve_tab, "Curve Builder")
         self.tabs.addTab(self.inverse_tab, "Inverse Estimation")
         self.tabs.addTab(self.calibrator_tab, "Calibrator")

@@ -23,9 +23,11 @@ methods.
 """
 
 from .confidence_band import ConfidenceBand
+from .profile_likelihood_band import ProfileLikelihoodBand
 from .prediction_band import PredictionBand
 
 __all__ = [
     "ConfidenceBand",
+    "ProfileLikelihoodBand",
     "PredictionBand",
 ]

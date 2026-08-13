@@ -145,6 +145,12 @@ class MLE:
         """
         initial_guess = np.asarray(initial_guess, dtype=float)
 
+        if method == "L-BFGS-B":
+            options = dict(kwargs.pop("options", {}))
+            options.setdefault("gtol", 5e-4)
+            options.setdefault("ftol", 1e-8)
+            kwargs["options"] = options
+
         optimizer_result = minimize(
             self.negative_loglik,
             x0=initial_guess,

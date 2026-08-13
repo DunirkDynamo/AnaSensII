@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime, timezone
 from itertools import combinations_with_replacement
 from pathlib import Path
 import pickle
 import sys
 
+import numpy as np
 import pandas as pd
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QPen, QPixmap, QRadialGradient
@@ -18,6 +21,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -46,8 +51,10 @@ from .data_loader import DataLoader
 from .band_service import BandComputationResult, BandService
 from .fitters import FitService
 from .models import FittingResult, LoadedDataset
+from .profile_likelihood_dialog import ProfileLikelihoodDialog
 from .plotter import PlotRenderer
 from .standard_curve import build_standard_curve_model
+from anasens.uncertainty.bands import ProfileLikelihoodBand
 
 
 class SynthwaveBackdrop(QWidget):
@@ -116,6 +123,109 @@ class SynthwaveBackdrop(QWidget):
         for point in star_points:
             painter.drawPoint(point)
 
+
+class CurveProvenanceDialog(QDialog):
+    """Collect optional provenance metadata for a saved curve object."""
+
+    def __init__(self, parent: QWidget | None = None, *, model_type: str = "", fit_method: str = "", error_model: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Curve Provenance")
+        self.setModal(True)
+
+        self._recommended_fields: dict[str, QLineEdit] = {}
+        self._custom_table = QTableWidget(0, 2, self)
+        self._custom_table.setHorizontalHeaderLabels(["Parameter", "Value"])
+        self._custom_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("Add optional metadata for this saved curve")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        recommended_box = QFrame(self)
+        recommended_box.setObjectName("card")
+        recommended_layout = QFormLayout(recommended_box)
+        recommended_layout.setContentsMargins(12, 12, 12, 12)
+        recommended_layout.setSpacing(8)
+
+        defaults = {
+            "date_of_creation": datetime.now(timezone.utc).date().isoformat(),
+            "smoothing_algorithm": "",
+            "baseline_algorithm": "",
+            "peak_finding_method": "",
+            "fit_method": fit_method or model_type,
+            "error_model": error_model,
+        }
+        for key, value in defaults.items():
+            field = QLineEdit(self)
+            field.setText(value)
+            self._recommended_fields[key] = field
+            recommended_layout.addRow(key.replace("_", " ").title(), field)
+
+        layout.addWidget(recommended_box)
+
+        custom_box = QFrame(self)
+        custom_box.setObjectName("card")
+        custom_layout = QVBoxLayout(custom_box)
+        custom_layout.setContentsMargins(12, 12, 12, 12)
+        custom_layout.setSpacing(8)
+
+        custom_title = QLabel("Add Parameter")
+        custom_title.setObjectName("subtitle")
+        custom_layout.addWidget(custom_title)
+
+        entry_row = QHBoxLayout()
+        self._custom_name_edit = QLineEdit(self)
+        self._custom_name_edit.setPlaceholderText("Parameter name")
+        self._custom_value_edit = QLineEdit(self)
+        self._custom_value_edit.setPlaceholderText("Value")
+        add_button = QPushButton("Confirm Add", self)
+        add_button.clicked.connect(self._add_custom_parameter)
+        entry_row.addWidget(self._custom_name_edit, 1)
+        entry_row.addWidget(self._custom_value_edit, 1)
+        entry_row.addWidget(add_button)
+        custom_layout.addLayout(entry_row)
+
+        custom_layout.addWidget(self._custom_table)
+        layout.addWidget(custom_box)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _add_custom_parameter(self) -> None:
+        name = self._custom_name_edit.text().strip()
+        value = self._custom_value_edit.text().strip()
+        if not name:
+            return
+
+        row = self._custom_table.rowCount()
+        self._custom_table.insertRow(row)
+        self._custom_table.setItem(row, 0, QTableWidgetItem(name))
+        self._custom_table.setItem(row, 1, QTableWidgetItem(value))
+        self._custom_name_edit.clear()
+        self._custom_value_edit.clear()
+        self._custom_name_edit.setFocus()
+
+    def metadata(self) -> dict[str, dict[str, str]]:
+        """Return the collected metadata split into recommended and custom groups."""
+        recommended = {name: widget.text().strip() for name, widget in self._recommended_fields.items() if widget.text().strip()}
+        custom: dict[str, str] = {}
+        for row in range(self._custom_table.rowCount()):
+            name_item = self._custom_table.item(row, 0)
+            value_item = self._custom_table.item(row, 1)
+            if name_item is None:
+                continue
+            name = name_item.text().strip()
+            if not name:
+                continue
+            custom[name] = value_item.text().strip() if value_item is not None else ""
+        return {"recommended": recommended, "custom": custom}
+
         # The ground grid uses a shared horizon line and perspective rays to
         # evoke the classic synthwave landscape beneath the application cards.
         horizon_pen = QPen(QColor("#48e3ff"), 2.0)
@@ -167,12 +277,15 @@ class PlotterFitterGUI(QMainWindow):
         self._last_custom_expression: str | None = None
         self._method_plot_entries: list[dict[str, object]] = []
         self._current_method_plot_index: int = 0
+        self._profile_likelihood_dialog: ProfileLikelihoodDialog | None = None
+        self._inverse_band_dialog: QDialog | None = None
+        self._profile_likelihood_popup_enabled = False
 
         # Core window metadata is established before widget construction so the
         # layout code can assume the main window shell already exists.
         self.setWindowTitle("Plotter Fitter")
         self.resize(1320, 840)
-        self.setMinimumSize(1020, 660)
+        self.setMinimumSize(940, 620)
 
         # Default control values are initialized centrally so the UI state is
         # predictable across fresh launches and future resets.
@@ -207,37 +320,37 @@ class PlotterFitterGUI(QMainWindow):
             QWidget {
                 color: #f5e9ff;
                 font-family: "Trebuchet MS";
-                font-size: 6.5pt;
+                font-size: 5.7pt;
                 selection-background-color: #ff5ac8;
                 selection-color: #090212;
             }
             QFrame#card {
                 background: rgba(11, 8, 27, 0.84);
                 border: 1px solid rgba(72, 227, 255, 0.65);
-                border-radius: 18px;
+                border-radius: 16px;
             }
             QFrame#accentCard {
                 background: rgba(15, 10, 34, 0.92);
                 border: 1px solid rgba(255, 90, 200, 0.72);
-                border-radius: 18px;
+                border-radius: 16px;
             }
             QLabel#title {
                 color: #ff5ac8;
                 font-family: "Segoe UI Black";
-                font-size: 20px;
+                font-size: 17px;
                 font-weight: 700;
                 letter-spacing: 1px;
             }
             QLabel#subtitle {
                 color: #8fe8ff;
-                font-size: 7pt;
+                font-size: 6pt;
                 font-weight: 600;
                 letter-spacing: 0px;
             }
             QLabel#sectionTitle {
                 color: #48e3ff;
                 font-family: "Segoe UI Semibold";
-                font-size: 9pt;
+                font-size: 7.5pt;
                 font-weight: 700;
             }
             QLabel#fileValue {
@@ -252,8 +365,8 @@ class PlotterFitterGUI(QMainWindow):
                 );
                 color: #fff7ff;
                 border: 1px solid rgba(72, 227, 255, 0.55);
-                border-radius: 8px;
-                padding: 3px 7px;
+                border-radius: 7px;
+                padding: 2px 6px;
                 font-weight: 600;
                 text-transform: uppercase;
             }
@@ -275,8 +388,8 @@ class PlotterFitterGUI(QMainWindow):
             QComboBox, QLineEdit, QTextEdit {
                 background: rgba(9, 8, 30, 0.9);
                 border: 1px solid rgba(255, 90, 200, 0.45);
-                border-radius: 8px;
-                padding: 2px 5px;
+                border-radius: 7px;
+                padding: 1px 4px;
                 color: #f8f1ff;
             }
             QCheckBox {
@@ -315,9 +428,9 @@ class PlotterFitterGUI(QMainWindow):
                     stop: 1 rgba(27, 10, 56, 0.94)
                 );
                 border: 1px solid rgba(72, 227, 255, 0.7);
-                border-radius: 10px;
-                padding: 7px;
-                font-size: 5.6pt;
+                border-radius: 9px;
+                padding: 6px;
+                font-size: 5.1pt;
                 selection-background-color: #48e3ff;
                 selection-color: #090212;
             }
@@ -335,9 +448,9 @@ class PlotterFitterGUI(QMainWindow):
         self.setCentralWidget(central_widget)
 
         outer_layout = QGridLayout(central_widget)
-        outer_layout.setContentsMargins(12, 12, 12, 12)
-        outer_layout.setHorizontalSpacing(8)
-        outer_layout.setVerticalSpacing(8)
+        outer_layout.setContentsMargins(9, 9, 9, 9)
+        outer_layout.setHorizontalSpacing(6)
+        outer_layout.setVerticalSpacing(6)
         outer_layout.setColumnStretch(0, 4)
         outer_layout.setColumnStretch(1, 3)
         outer_layout.setRowStretch(0, 1)
@@ -345,19 +458,21 @@ class PlotterFitterGUI(QMainWindow):
         left_panel = QWidget(central_widget)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(8)
+        left_layout.setSpacing(6)
 
         plot_frame = self._create_card_frame()
         plot_frame.setObjectName("card")
         plot_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        plot_layout = QVBoxLayout(plot_frame)
-        plot_layout.setContentsMargins(7, 7, 7, 7)
-        plot_layout.setSpacing(5)
+        plot_layout = plot_frame.layout()
+        if plot_layout is None:
+            plot_layout = QVBoxLayout(plot_frame)
+        plot_layout.setContentsMargins(5, 5, 5, 5)
+        plot_layout.setSpacing(4)
 
         method_nav_widget = QWidget(plot_frame)
         method_nav_layout = QHBoxLayout(method_nav_widget)
         method_nav_layout.setContentsMargins(0, 0, 0, 0)
-        method_nav_layout.setSpacing(5)
+        method_nav_layout.setSpacing(4)
 
         self.prev_method_plot_button = QPushButton("Prev")
         self.prev_method_plot_button.setEnabled(False)
@@ -383,15 +498,15 @@ class PlotterFitterGUI(QMainWindow):
         stats_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         control_frame = self._create_card_frame()
-        control_frame.setMinimumWidth(420)
+        control_frame.setMinimumWidth(390)
 
         right_panel = QWidget(central_widget)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(8)
+        right_layout.setSpacing(6)
 
-        left_layout.addWidget(plot_frame, 3)
-        left_layout.addWidget(stats_frame, 2)
+        left_layout.addWidget(plot_frame, 18)
+        left_layout.addWidget(stats_frame, 7)
         right_layout.addWidget(control_frame, 1)
 
         outer_layout.addWidget(left_panel, 0, 0)
@@ -410,8 +525,8 @@ class PlotterFitterGUI(QMainWindow):
         card_frame = QFrame(self)
         card_frame.setObjectName("card")
         card_layout = QVBoxLayout(card_frame)
-        card_layout.setContentsMargins(10, 10, 10, 10)
-        card_layout.setSpacing(9)
+        card_layout.setContentsMargins(8, 8, 8, 8)
+        card_layout.setSpacing(7)
 
         # Drop-shadow effects help the cards feel like luminous panels floating
         # above the painted synthwave landscape.
@@ -474,8 +589,6 @@ class PlotterFitterGUI(QMainWindow):
         self.filter_column_combobox = QComboBox(parent)
         self.filter_value_entry = QLineEdit(parent)
         self.add_filter_button = QPushButton("Add")
-        self.confirm_filter_button = QPushButton("Confirm")
-        self.clear_filters_button = QPushButton("Clear")
         self.show_active_filters_button = QPushButton("Show active filters")
         self.x_axis_combobox.setEditable(False)
         self.y_axis_combobox.setEditable(False)
@@ -485,16 +598,14 @@ class PlotterFitterGUI(QMainWindow):
         self.filter_column_combobox.setEnabled(False)
         self.filter_value_entry.setEnabled(False)
         self.add_filter_button.setEnabled(False)
-        self.confirm_filter_button.setEnabled(False)
-        self.clear_filters_button.setEnabled(False)
         self.x_axis_combobox.addItem("Load data to choose a column")
         self.y_axis_combobox.addItem("Load data to choose a column")
         self.filter_column_combobox.addItem("Choose filter column")
         self.filter_value_entry.setPlaceholderText("Exact value to keep")
         self.add_filter_button.clicked.connect(self._handle_add_filter)
-        self.confirm_filter_button.clicked.connect(self._handle_confirm_filter)
-        self.clear_filters_button.clicked.connect(self._handle_clear_filters)
         self.show_active_filters_button.clicked.connect(self._handle_show_active_filters)
+        self.x_axis_combobox.currentTextChanged.connect(self._invalidate_confirmed_plot)
+        self.y_axis_combobox.currentTextChanged.connect(self._invalidate_confirmed_plot)
         self.plot_button = QPushButton("Confirm plot")
         self.plot_button.setEnabled(False)
         self.plot_button.clicked.connect(self._handle_plot_data)
@@ -531,10 +642,8 @@ class PlotterFitterGUI(QMainWindow):
         filter_layout.addWidget(filter_label, 0, 0)
         filter_layout.addWidget(self.filter_column_combobox, 0, 1)
         filter_layout.addWidget(self.filter_value_entry, 0, 2, 1, 2)
-        filter_layout.addWidget(self.add_filter_button, 1, 0)
-        filter_layout.addWidget(self.confirm_filter_button, 1, 1)
-        filter_layout.addWidget(self.clear_filters_button, 1, 2)
-        filter_layout.addWidget(self.show_active_filters_button, 1, 3)
+        filter_layout.addWidget(self.add_filter_button, 1, 0, 1, 2)
+        filter_layout.addWidget(self.show_active_filters_button, 1, 2, 1, 2)
 
         filter_section = self._create_card_frame()
         filter_section.setGraphicsEffect(None)
@@ -565,7 +674,7 @@ class PlotterFitterGUI(QMainWindow):
         custom_label = QLabel("Custom LaTeX")
 
         self.fit_combobox = QComboBox(parent)
-        self.fit_combobox.addItems(["polynomial", "power", "custom", "quantile"])
+        self.fit_combobox.addItems(["polynomial", "power", "custom"])
         self.fit_combobox.setCurrentText(self.default_fit_type)
         self.fit_combobox.currentTextChanged.connect(self._handle_fit_type_change)
 
@@ -1031,8 +1140,6 @@ class PlotterFitterGUI(QMainWindow):
             self.filter_column_combobox.setEnabled(False)
             self.filter_value_entry.setEnabled(False)
             self.add_filter_button.setEnabled(False)
-            self.confirm_filter_button.setEnabled(False)
-            self.clear_filters_button.setEnabled(False)
             self.plot_button.setEnabled(False)
             self.apply_fit_button.setEnabled(False)
             QMessageBox.warning(self, "No columns", "The loaded dataset has no columns to select.")
@@ -1040,13 +1147,11 @@ class PlotterFitterGUI(QMainWindow):
 
         self.x_axis_combobox.setEnabled(True)
         self.y_axis_combobox.setEnabled(True)
-        self.filter_column_combobox.setEnabled(False)
-        self.filter_value_entry.setEnabled(False)
+        self.filter_column_combobox.setEnabled(True)
+        self.filter_value_entry.setEnabled(True)
         self.add_filter_button.setEnabled(True)
-        self.confirm_filter_button.setEnabled(False)
-        self.clear_filters_button.setEnabled(False)
         self.plot_button.setEnabled(True)
-        self.apply_fit_button.setEnabled(True)
+        self.apply_fit_button.setEnabled(False)
         self.x_axis_combobox.setCurrentText(column_names[0])
         self.y_axis_combobox.setCurrentText(column_names[1] if len(column_names) > 1 else column_names[0])
         self.filter_column_combobox.setCurrentText("Choose filter column")
@@ -1080,6 +1185,7 @@ class PlotterFitterGUI(QMainWindow):
             self.y_axis_combobox.currentText(),
         )
         self.current_plot_result = None
+        self.apply_fit_button.setEnabled(True)
         self.export_model_button.setEnabled(False)
         self._set_statistics_text("TRACE RENDERED\n\nData plotted. Choose a fit type and apply a fit.")
 
@@ -1091,7 +1197,7 @@ class PlotterFitterGUI(QMainWindow):
 
         fit_type = self.fit_combobox.currentText()
         selected_methods = self._selected_joint_interval_methods()
-        if fit_type != "quantile" and not selected_methods:
+        if not selected_methods:
             QMessageBox.warning(
                 self,
                 "No interval method",
@@ -1099,8 +1205,8 @@ class PlotterFitterGUI(QMainWindow):
             )
             return
 
-        selected_prediction_methods = ["quantile_regression"] if fit_type == "quantile" else list(selected_methods)
-        selected_confidence_methods = [] if fit_type == "quantile" else list(selected_methods)
+        selected_prediction_methods = list(selected_methods)
+        selected_confidence_methods = [method for method in selected_methods if method != "quantile_regression"]
         if not selected_prediction_methods:
             QMessageBox.warning(
                 self,
@@ -1139,6 +1245,26 @@ class PlotterFitterGUI(QMainWindow):
             self.y_axis_combobox.currentText(),
         )
         self.plot_renderer.overlay_fit(fitting_result)
+        residuals = np.asarray(
+            (fitting_result.extras or {}).get("residuals")
+            if fitting_result.extras is not None and "residuals" in fitting_result.extras
+            else y_numeric - np.asarray(fitting_result.model_function(x_numeric, *fitting_result.parameter_values), dtype=float),
+            dtype=float,
+        )
+
+        fit_method = (fitting_result.fit_method or "").strip().lower()
+        should_overlay_error_model = fit_method != "quantile_regression" and self._selected_monte_carlo_mode() != "residual_bootstrap"
+        error_model_parameters = None
+        if should_overlay_error_model:
+            error_model_parameters = self._error_model_parameters_from_sigma(fitting_result.residual_std)
+
+        self.plot_renderer.plot_residuals(
+            x_numeric,
+            residuals,
+            self.x_axis_combobox.currentText(),
+            error_model_name=self.error_model_combobox.currentText() if should_overlay_error_model else None,
+            error_model_parameters=error_model_parameters,
+        )
         bands: BandComputationResult | None = None
         try:
             bands = self.band_service.compute_confidence_bands(
@@ -1151,6 +1277,7 @@ class PlotterFitterGUI(QMainWindow):
                 confidence_alpha=confidence_alpha,
                 prediction_alpha=prediction_alpha,
                 error_model_name=self.error_model_combobox.currentText(),
+                grid_size=25,
                 monte_carlo_mode=self._selected_monte_carlo_mode(),
             )
         except Exception as exc:
@@ -1159,9 +1286,22 @@ class PlotterFitterGUI(QMainWindow):
 
         self.plot_renderer.overlay_prediction_bands(bands.prediction_bands)
         self.plot_renderer.overlay_confidence_bands(bands.confidence_bands)
-        for profile_map in bands.profile_prediction_maps.values():
-            self.plot_renderer.overlay_profile_prediction_map(profile_map)
 
+        ci_point_x, ci_point_lower, ci_point_upper = self._confidence_points_for_band(bands.confidence_band)
+        curve_object = build_standard_curve_model(
+            fitting_result,
+            x_numeric,
+            y_numeric,
+            model_type=self.fit_combobox.currentText(),
+            expression_text=self.custom_entry.text().strip() if self.fit_combobox.currentText() == "custom" else None,
+            error_model_name=self.error_model_combobox.currentText(),
+            error_model_parameters=self._error_model_parameters_from_sigma(bands.sigma),
+            ci_point_x=ci_point_x,
+            ci_point_lower=ci_point_lower,
+            ci_point_upper=ci_point_upper,
+            ci_coverage=1.0 - bands.confidence_alpha,
+            pi_coverage=1.0 - bands.prediction_alpha,
+        )
         self.current_plot_result = fitting_result
         self._current_bands = bands
         self._last_fit_x = x_numeric
@@ -1180,6 +1320,13 @@ class PlotterFitterGUI(QMainWindow):
             ],
             bands=bands,
         )
+        try:
+            # The estimate-limits panel remains in the main fit view as the
+            # final (fourth) subplot in the collapsed layout.
+            inverse_band_data = curve_object.inverse_band_curve(band="prediction")
+            self.plot_renderer.plot_estimate_limits_band(inverse_band_data)
+        except Exception as exc:
+            QMessageBox.warning(self, "Inverse plot unavailable", str(exc))
 
     def _handle_export_model(self) -> None:
         """Export fitted standard-curve artifacts (plot, model pickle, details)."""
@@ -1203,6 +1350,13 @@ class PlotterFitterGUI(QMainWindow):
         export_dir.mkdir(parents=True, exist_ok=True)
 
         model_type = self._last_fit_type or "polynomial"
+        provenance_payload = self._collect_curve_metadata(model_type=model_type)
+        if provenance_payload is None:
+            return
+
+        ci_point_x, ci_point_lower, ci_point_upper = self._confidence_points_for_band(
+            self._current_bands.confidence_band if self._current_bands is not None else None
+        )
         curve_object = build_standard_curve_model(
             self.current_plot_result,
             self._last_fit_x,
@@ -1213,8 +1367,13 @@ class PlotterFitterGUI(QMainWindow):
             error_model_parameters=self._error_model_parameters_from_sigma(
                 self._current_bands.sigma if self._current_bands is not None else None
             ),
+            ci_point_x=ci_point_x,
+            ci_point_lower=ci_point_lower,
+            ci_point_upper=ci_point_upper,
             ci_coverage=(1.0 - self._current_bands.confidence_alpha) if self._current_bands is not None else None,
             pi_coverage=(1.0 - self._current_bands.prediction_alpha) if self._current_bands is not None else None,
+            provenance=provenance_payload["recommended"],
+            extras=provenance_payload["custom"],
         )
 
         plot_path = export_dir / f"{model_name.strip()}-plot.png"
@@ -1252,6 +1411,9 @@ class PlotterFitterGUI(QMainWindow):
         error_model_name = self.error_model_combobox.currentText()
         sigma = bands.sigma if bands is not None else None
         error_model_parameters = self._error_model_parameters_from_sigma(sigma)
+        provenance_payload = self._collect_curve_metadata(model_type=model_type)
+        if provenance_payload is None:
+            return
 
         for method_key in method_keys:
             method_label = self._prediction_method_display_name(method_key)
@@ -1282,6 +1444,7 @@ class PlotterFitterGUI(QMainWindow):
             if not destination_dir:
                 continue
 
+            ci_point_x, ci_point_lower, ci_point_upper = self._confidence_points_for_method(method_key, bands)
             pi_point_x, pi_point_lower, pi_point_upper = self._pi_points_for_method(method_key, bands)
 
             curve_object = build_standard_curve_model(
@@ -1293,11 +1456,16 @@ class PlotterFitterGUI(QMainWindow):
                 error_model_name=error_model_name,
                 error_model_parameters=error_model_parameters,
                 pi_method=method_key,
+                ci_point_x=ci_point_x,
+                ci_point_lower=ci_point_lower,
+                ci_point_upper=ci_point_upper,
                 pi_point_x=pi_point_x,
                 pi_point_lower=pi_point_lower,
                 pi_point_upper=pi_point_upper,
                 ci_coverage=(1.0 - bands.confidence_alpha) if bands is not None else None,
                 pi_coverage=(1.0 - bands.prediction_alpha) if bands is not None else None,
+                provenance=provenance_payload["recommended"],
+                extras=provenance_payload["custom"],
             )
 
             model_path = Path(destination_dir) / f"{model_name.strip()}_model.pkl"
@@ -1331,10 +1499,10 @@ class PlotterFitterGUI(QMainWindow):
 
         profile_map = bands.profile_prediction_maps.get(method_key)
         if profile_map is not None:
-            x_mle = np.asarray(profile_map["x_mle"], dtype=float)
-            y_grid = np.asarray(profile_map["y_grid"], dtype=float)
-            x_lower = np.asarray(profile_map["x_lower"], dtype=float)
-            x_upper = np.asarray(profile_map["x_upper"], dtype=float)
+            x_mle = np.asarray(profile_map.x_mle, dtype=float)
+            y_grid = np.asarray(profile_map.y_grid, dtype=float)
+            x_lower = np.asarray(profile_map.x_lower, dtype=float)
+            x_upper = np.asarray(profile_map.x_upper, dtype=float)
 
             if x_mle.size < 2 or y_grid.size < 2:
                 return None, None, None
@@ -1367,6 +1535,42 @@ class PlotterFitterGUI(QMainWindow):
             return x_common, lower_interp, upper_interp
 
         return None, None, None
+
+    def _confidence_points_for_method(
+        self,
+        method_key: str,
+        bands: BandComputationResult | None,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        """Return point-based CI arrays for persistence/interpolation."""
+        if bands is None:
+            return None, None, None
+
+        confidence_band = bands.confidence_bands.get(method_key)
+        if confidence_band is None:
+            confidence_band = bands.confidence_band
+
+        if confidence_band is None:
+            return None, None, None
+
+        return (
+            np.asarray(confidence_band.x_grid, dtype=float),
+            np.asarray(confidence_band.lower_values, dtype=float),
+            np.asarray(confidence_band.upper_values, dtype=float),
+        )
+
+    def _confidence_points_for_band(
+        self,
+        band,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+        """Return point arrays for a specific confidence band object."""
+        if band is None:
+            return None, None, None
+
+        return (
+            np.asarray(band.x_grid, dtype=float),
+            np.asarray(band.lower_values, dtype=float),
+            np.asarray(band.upper_values, dtype=float),
+        )
 
     def _handle_prev_method_plot(self) -> None:
         """Navigate to the previous method plot entry if available."""
@@ -1422,6 +1626,30 @@ class PlotterFitterGUI(QMainWindow):
             return {"a": 4.0, "scale": sigma_value}
         return None
 
+    def _collect_curve_metadata(self, model_type: str) -> dict[str, dict[str, str]] | None:
+        """Prompt the user for provenance metadata and return recommended/custom groups."""
+        if self.current_plot_result is None:
+            return None
+
+        dialog = CurveProvenanceDialog(
+            self,
+            model_type=model_type,
+            fit_method=self.current_plot_result.fit_method or model_type,
+            error_model=self.error_model_combobox.currentText(),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        metadata = dialog.metadata()
+        recommended = metadata.get("recommended", {})
+        custom = metadata.get("custom", {})
+        if self.current_plot_result.fit_method and not recommended.get("fit_method"):
+            recommended["fit_method"] = self.current_plot_result.fit_method
+        if not recommended.get("error_model"):
+            recommended["error_model"] = self.error_model_combobox.currentText()
+        recommended.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        return {"recommended": recommended, "custom": custom}
+
     def _fit_selected_model(self, x_values, y_values) -> FittingResult:
         """Dispatch to the requested fitting method.
 
@@ -1449,15 +1677,6 @@ class PlotterFitterGUI(QMainWindow):
                 y_values,
                 latex_expression,
                 parameter_names=parameter_names or None,
-            )
-        if fit_type == "quantile":
-            polynomial_order = int(self.polynomial_entry.text())
-            coverage = 1.0 - self._coverage_to_alpha(self.prediction_coverage_entry.text(), "PI coverage")
-            return self.fit_service.fit_quantile_polynomial(
-                x_values,
-                y_values,
-                polynomial_order,
-                coverage=coverage,
             )
 
         raise ValueError(f"Unsupported fit type: {fit_type}")
@@ -1533,7 +1752,7 @@ class PlotterFitterGUI(QMainWindow):
             if bands.profile_prediction_maps:
                 for method_key, profile_map in bands.profile_prediction_maps.items():
                     lines.append(
-                        f"  {self._prediction_method_display_name(method_key)} map points: {len(profile_map['y_grid'])}"
+                        f"  {self._prediction_method_display_name(method_key)} map points: {len(profile_map.y_grid)}"
                     )
 
             if bands.prediction_errors:
@@ -1599,11 +1818,154 @@ class PlotterFitterGUI(QMainWindow):
             return "Delta Method"
         if normalized_key == "monte_carlo":
             return "Monte Carlo"
-        if normalized_key == "profile_likelihood_modified":
-            return "Profile Likelihood (Modified)"
+        if normalized_key in {"profile_likelihood", "profile_likelihood_modified"}:
+            return "Profile Likelihood"
         if normalized_key == "quantile_regression":
             return "Quantile Regression"
         return method_key.replace("_", " ").title()
+
+    def _show_profile_likelihood_popup(self, profile_map: ProfileLikelihoodBand) -> None:
+        """Open a popup window showing inverse-calibration and resolution plots."""
+        if not self._profile_likelihood_popup_enabled:
+            return
+
+        if self._profile_likelihood_dialog is not None:
+            self._profile_likelihood_dialog.close()
+
+        self._profile_likelihood_dialog = ProfileLikelihoodDialog(profile_map, parent=self)
+        self._profile_likelihood_dialog.show()
+
+    def _show_inverse_band_popup(self, curve_object) -> None:
+        """Display the inverse calibration and resolution plots in a scrollable window.
+
+        Purpose:
+            Present the prediction-band inversion curves in a wide viewport so
+            the user can scroll horizontally when the rendered figure exceeds the
+            dialog width.
+
+        Inputs:
+            curve_object: Serializable standard-curve model that exposes the
+                prediction-band inverse curve data.
+
+        Output:
+            None. The method creates and shows a non-modal dialog owned by the
+            main window.
+        """
+        try:
+            # Use prediction-band inversion so the popup reflects observation uncertainty.
+            band_data = curve_object.inverse_band_curve(band="prediction")
+        except Exception as exc:
+            QMessageBox.warning(self, "Inverse band unavailable", str(exc))
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Inverse Calibration and Resolution")
+        dialog.resize(1280, 760)
+        dialog.setModal(False)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        # Build a wide figure so the horizontal scrollbar has a meaningful range
+        # and the plot does not feel cramped at the default dialog width.
+        figure = Figure(figsize=(18.0, 6.2), dpi=150, facecolor="#0c0820")
+        canvas = FigureCanvasQTAgg(figure)
+        canvas.setMinimumWidth(1750)
+        canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        # Place the canvas inside a scroll area so users can pan horizontally
+        # through the two-panel figure without shrinking the plot itself.
+        plot_host = QWidget()
+        plot_layout = QVBoxLayout(plot_host)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.addWidget(canvas)
+
+        plot_scroll = QScrollArea()
+        plot_scroll.setWidgetResizable(True)
+        plot_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        plot_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        plot_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        plot_scroll.setWidget(plot_host)
+        layout.addWidget(plot_scroll)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.close)
+        button_row.addWidget(close_button)
+        layout.addLayout(button_row)
+
+        y_grid = np.asarray(band_data["y_grid"], dtype=float)
+        x_mle = np.asarray(band_data["x_mle"], dtype=float)
+        x_lower = np.asarray(band_data["x_lower"], dtype=float)
+        x_upper = np.asarray(band_data["x_upper"], dtype=float)
+        resolution = np.asarray(band_data["resolution"], dtype=float)
+        valid = np.isfinite(x_mle) & np.isfinite(x_lower) & np.isfinite(x_upper) & np.isfinite(resolution)
+
+        figure.clear()
+        ax1 = figure.add_subplot(111)
+        ax2 = ax1.twinx()
+
+        # Publication-style axis treatment: stronger typography, visible ticks,
+        # and consistent framing so the shared-x plot reads as a single figure.
+        for axis in (ax1, ax2):
+            axis.set_facecolor("#f8f7fb")
+            axis.tick_params(axis="both", which="major", labelsize=10, length=6, width=1.1, direction="out")
+            axis.tick_params(axis="both", which="minor", labelsize=9, length=3, width=0.9, direction="out")
+            for spine in axis.spines.values():
+                spine.set_linewidth(1.1)
+                spine.set_color("#1c1c1c")
+
+        # Main inverse calibration curve and prediction-band envelope on the
+        # left y-axis.
+        ax1.plot(y_grid, x_mle, color="#111111", linewidth=2.4, label=r"MLE point estimate $\hat{x}_0(y_0)$")
+        ax1.plot(y_grid, x_lower, color="#2f3b4c", linestyle="--", linewidth=1.9, label=r"Confidence Interval Limits")
+        ax1.plot(y_grid, x_upper, color="#2f3b4c", linestyle="--", linewidth=1.9, label="_nolegend_")
+        ax1.fill_between(y_grid, x_lower, x_upper, color="#1f77b4", alpha=0.14, label="Prediction uncertainty band")
+        ax1.set_title("Inverse Calibration and Resolution", fontsize=15, pad=12, fontweight="semibold")
+        ax1.set_xlabel(r"Hypothetical Measurement Observation ($y_0$)", fontsize=13, labelpad=8)
+        ax1.set_ylabel(r"Inferred Parameter Estimate ($x_0$)", fontsize=13, labelpad=8)
+        ax1.minorticks_on()
+        ax1.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.18)
+        ax1.grid(True, which="minor", linestyle=":", linewidth=0.4, alpha=0.12)
+
+        # Relative resolution on the right y-axis, sharing the same x-axis as
+        # the inverse calibration curve so the relationship is visually direct.
+        ax2.plot(
+            x_mle[valid],
+            resolution[valid],
+            color="darkmagenta",
+            linewidth=2.8,
+            label=r"Relative width: $\frac{x_0^{\mathrm{upper}} - x_0^{\mathrm{lower}}}{\hat{x}_0}$",
+        )
+        ax2.set_ylabel("Resolution", fontsize=13, labelpad=8)
+        ax2.minorticks_on()
+        ax2.grid(False)
+
+        # Merge the handles from both axes so the legend explains all plotted
+        # quantities without repeating the band edge entry twice.
+        handles1, labels1 = ax1.get_legend_handles_labels()
+        handles2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(
+            handles1 + handles2,
+            labels1 + labels2,
+            loc="upper left",
+            frameon=True,
+            facecolor="white",
+            framealpha=0.95,
+            fontsize=10,
+            borderpad=0.7,
+        )
+
+        figure.tight_layout(pad=1.4)
+        canvas.draw_idle()
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._inverse_band_dialog = dialog
 
     def _extract_numeric_series(
         self,
@@ -1645,104 +2007,132 @@ class PlotterFitterGUI(QMainWindow):
         return numeric_frame[x_column], numeric_frame[y_column]
 
     def _handle_add_filter(self) -> None:
-        """Enable the pending filter controls so the user can define one more filter."""
+        """Add the selected filter column and value to the active filter list."""
         if self.loaded_dataset is None:
             QMessageBox.warning(self, "No data", "Load a dataset before adding filters.")
             return
 
-        self.filter_column_combobox.setEnabled(True)
-        self.filter_value_entry.setEnabled(True)
-        self.confirm_filter_button.setEnabled(True)
-        self.add_filter_button.setEnabled(False)
-        self.filter_column_combobox.setCurrentText("Choose filter column")
-        self.filter_value_entry.clear()
-        self.filter_value_entry.setFocus()
-
-    def _handle_confirm_filter(self) -> None:
-        """Commit the pending filter to the active filter list."""
         filter_column = self.filter_column_combobox.currentText().strip()
         filter_value = self.filter_value_entry.text().strip()
 
-        if not filter_column or filter_column == "Choose filter column":
-            QMessageBox.warning(self, "Missing filter column", "Choose a filter column before confirming.")
-            return
-        if not filter_value:
-            QMessageBox.warning(self, "Missing filter value", "Enter a filter value before confirming.")
+        if not filter_column or filter_column == "Choose filter column" or not filter_value:
+            QMessageBox.warning(
+                self,
+                "Incomplete filter",
+                "A filter requires a column selection and a value input.",
+            )
             return
 
         self._active_filters.append((filter_column, filter_value))
         self._refresh_active_filters_label()
-        self.filter_column_combobox.setEnabled(False)
-        self.filter_value_entry.setEnabled(False)
-        self.confirm_filter_button.setEnabled(False)
-        self.add_filter_button.setEnabled(True)
-        self.clear_filters_button.setEnabled(True)
-        self.filter_column_combobox.setCurrentText("Choose filter column")
         self.filter_value_entry.clear()
+        self.filter_value_entry.setFocus()
+        self._invalidate_confirmed_plot()
 
     def _refresh_active_filters_label(self) -> None:
         """Update the active-filter controls."""
-        self.clear_filters_button.setEnabled(bool(self._active_filters))
         self.show_active_filters_button.setEnabled(True)
 
     def _handle_show_active_filters(self) -> None:
-        """Open a pop-up window showing the active filters in two columns."""
+        """Open a pop-up window showing the active filters with bulk actions."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Active filters")
-        dialog.resize(640, 360)
+        dialog.resize(700, 420)
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
         table = QTableWidget(dialog)
-        table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["Filter variable", "Value"])
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["", "Filter variable", "Value"])
         table.setRowCount(max(len(self._active_filters), 1))
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         table.setAlternatingRowColors(True)
 
-        if not self._active_filters:
-            table.setItem(0, 0, QTableWidgetItem("No active filters"))
-            table.setItem(0, 1, QTableWidgetItem(""))
-        else:
-            for row_index, (column, value) in enumerate(self._active_filters):
-                table.setItem(row_index, 0, QTableWidgetItem(column))
-                table.setItem(row_index, 1, QTableWidgetItem(value))
+        def refresh_table() -> None:
+            table.setRowCount(max(len(self._active_filters), 1))
+            if not self._active_filters:
+                first_item = QTableWidgetItem("")
+                first_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                table.setItem(0, 0, first_item)
+                table.setItem(0, 1, QTableWidgetItem("No active filters"))
+                table.setItem(0, 2, QTableWidgetItem(""))
+                return
 
+            for row_index, (column, value) in enumerate(self._active_filters):
+                checkbox_item = QTableWidgetItem("")
+                checkbox_item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsSelectable
+                )
+                checkbox_item.setCheckState(Qt.CheckState.Unchecked)
+                table.setItem(row_index, 0, checkbox_item)
+                table.setItem(row_index, 1, QTableWidgetItem(column))
+                table.setItem(row_index, 2, QTableWidgetItem(value))
+
+        refresh_table()
+
+        button_row = QHBoxLayout()
+        select_all_button = QPushButton("Select all", dialog)
+        delete_button = QPushButton("Delete selected", dialog)
         close_button = QPushButton("Close", dialog)
+
+        def select_all() -> None:
+            for row_index in range(table.rowCount()):
+                item = table.item(row_index, 0)
+                if item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    item.setCheckState(Qt.CheckState.Checked)
+
+        def delete_selected() -> None:
+            selected_indexes: list[int] = []
+            for row_index in range(table.rowCount()):
+                item = table.item(row_index, 0)
+                if item is not None and item.checkState() == Qt.CheckState.Checked:
+                    selected_indexes.append(row_index)
+
+            if not selected_indexes:
+                QMessageBox.information(
+                    dialog,
+                    "No filters selected",
+                    "Select one or more filters to delete.",
+                )
+                return
+
+            for row_index in sorted(selected_indexes, reverse=True):
+                del self._active_filters[row_index]
+
+            self._refresh_active_filters_label()
+            self._invalidate_confirmed_plot()
+            refresh_table()
+
+        select_all_button.clicked.connect(select_all)
+        delete_button.clicked.connect(delete_selected)
         close_button.clicked.connect(dialog.close)
 
+        button_row.addWidget(select_all_button)
+        button_row.addWidget(delete_button)
+        button_row.addStretch(1)
+        button_row.addWidget(close_button)
+
         layout.addWidget(table)
-        layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(button_row)
         dialog.setModal(False)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
         self._active_filters_dialog = dialog
 
-    def _remove_filter(self, index: int) -> None:
-        """Remove one confirmed filter by index and refresh the visible list."""
-        if index < 0 or index >= len(self._active_filters):
-            return
-
-        del self._active_filters[index]
-        self._refresh_active_filters_label()
-
-    def _handle_clear_filters(self) -> None:
-        """Remove all confirmed filters and reset pending filter controls."""
-        self._active_filters = []
-        self._refresh_active_filters_label()
-        self.filter_column_combobox.setCurrentText("Choose filter column")
-        self.filter_value_entry.clear()
-        self.filter_column_combobox.setEnabled(False)
-        self.filter_value_entry.setEnabled(False)
-        self.confirm_filter_button.setEnabled(False)
-        self.add_filter_button.setEnabled(self.loaded_dataset is not None)
+    def _invalidate_confirmed_plot(self, *_args) -> None:
+        """Mark the current plot as stale until the user confirms it again."""
+        if hasattr(self, "apply_fit_button"):
+            self.apply_fit_button.setEnabled(False)
 
     def _filter_frame_by_value(self, frame: pd.DataFrame, filter_column: str, filter_value: str) -> pd.DataFrame:
         """Return rows whose filter column matches the requested value."""
@@ -1774,13 +2164,9 @@ class PlotterFitterGUI(QMainWindow):
             self._update_latex_preview("")
         elif value == "custom":
             self.polynomial_entry.clear()
-            self.custom_entry.clear()
-            self.param_entry.clear()
-            self._update_latex_preview("")
-        elif value == "quantile":
-            self.custom_entry.clear()
-            self.param_entry.clear()
-            self._update_latex_preview("")
+            if not self.custom_entry.text().strip():
+                self.custom_entry.setText(self.default_custom_latex)
+            self._update_latex_preview(self.custom_entry.text())
         else:  # power
             self.polynomial_entry.clear()
             self.custom_entry.clear()
@@ -1792,7 +2178,7 @@ class PlotterFitterGUI(QMainWindow):
     def _update_fit_input_visibility(self) -> None:
         """Show or hide fit-specific parameter input widgets."""
         fit_type = self.fit_combobox.currentText()
-        uses_polynomial_order = fit_type in {"polynomial", "quantile"}
+        uses_polynomial_order = fit_type == "polynomial"
         self.polynomial_label.setVisible(uses_polynomial_order)
         self.polynomial_entry.setVisible(uses_polynomial_order)
         self.polynomial_entry.setEnabled(uses_polynomial_order)
@@ -1802,44 +2188,37 @@ class PlotterFitterGUI(QMainWindow):
         self.param_label.setEnabled(fit_type == "custom")
         self.param_entry.setEnabled(fit_type == "custom")
 
-        quantile_mode = fit_type == "quantile"
-        self.interval_methods_label.setEnabled(not quantile_mode)
-        self.interval_methods_widget.setEnabled(not quantile_mode)
-        self.confidence_coverage_label.setEnabled(not quantile_mode)
-        self.confidence_coverage_entry.setEnabled(not quantile_mode)
+        self.interval_methods_label.setEnabled(True)
+        self.interval_methods_widget.setEnabled(True)
+        self.confidence_coverage_label.setEnabled(True)
+        self.confidence_coverage_entry.setEnabled(True)
 
-        self.error_model_label.setEnabled(not quantile_mode)
-        self.error_model_combobox.setVisible(not quantile_mode)
-        self.error_model_combobox.setEnabled(not quantile_mode)
-        self.error_model_na_label.setVisible(quantile_mode)
+        self.error_model_label.setEnabled(True)
+        self.error_model_combobox.setVisible(True)
+        self.error_model_combobox.setEnabled(True)
+        self.error_model_na_label.setVisible(False)
 
-        delta_selected = self.interval_delta_checkbox.isChecked() and not quantile_mode
+        delta_selected = self.interval_delta_checkbox.isChecked()
         self.delta_order_label.setEnabled(delta_selected)
         self.delta_order_combobox.setEnabled(delta_selected)
 
-        monte_carlo_selected = self.interval_monte_carlo_checkbox.isChecked() and not quantile_mode
+        monte_carlo_selected = self.interval_monte_carlo_checkbox.isChecked()
         self.monte_carlo_mode_label.setVisible(monte_carlo_selected)
         self.monte_carlo_mode_combobox.setVisible(monte_carlo_selected)
         self.monte_carlo_mode_label.setEnabled(monte_carlo_selected)
         self.monte_carlo_mode_combobox.setEnabled(monte_carlo_selected)
 
         supports_exact = fit_type == "polynomial" and self.error_model_combobox.currentText().strip().lower() == "gaussian"
-        self.interval_exact_checkbox.setEnabled((not quantile_mode) and supports_exact)
+        self.interval_exact_checkbox.setEnabled(supports_exact)
         if not supports_exact:
             self.interval_exact_checkbox.setChecked(False)
 
-        self.interval_quantile_checkbox.setEnabled(quantile_mode)
+        self.interval_profile_checkbox.setEnabled(True)
 
-        if quantile_mode:
-            self.interval_exact_checkbox.setChecked(False)
-            self.interval_delta_checkbox.setChecked(False)
-            self.interval_monte_carlo_checkbox.setChecked(False)
-            self.interval_profile_checkbox.setChecked(False)
-            self.interval_quantile_checkbox.setChecked(True)
-        else:
-            self.interval_quantile_checkbox.setChecked(False)
-            if not self._selected_joint_interval_methods():
-                self.interval_delta_checkbox.setChecked(True)
+        self.interval_quantile_checkbox.setEnabled(True)
+
+        if not self._selected_joint_interval_methods():
+            self.interval_delta_checkbox.setChecked(True)
 
         if fit_type == "custom":
             self._update_latex_preview(self.custom_entry.text())
