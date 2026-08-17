@@ -57,6 +57,7 @@ class ExploreTab(QWidget):
         self._table_filters: list[dict[str, object]] = []
         self._fit_service = FitService()
         self._fit_stats_dialog: QDialog | None = None
+        self._box_stats_summary_text: str | None = None
         self._pairplot_dialog: QDialog | None = None
         self._active_table_filters_dialog: QDialog | None = None
         self._gaussian_marginals_dialog: QDialog | None = None
@@ -71,10 +72,6 @@ class ExploreTab(QWidget):
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(18, 18, 18, 18)
         root_layout.setSpacing(12)
-
-        title = QLabel("Explore")
-        title.setObjectName("sectionTitle")
-        root_layout.addWidget(title)
 
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -316,20 +313,30 @@ class ExploreTab(QWidget):
         plot_card_right_layout.addWidget(self._canvas)
         right_layout.addWidget(plot_card_right, 2)
 
-        table_label = QLabel("Loaded data preview (first 10 rows)")
-        table_label.setObjectName("sectionTitle")
-        right_layout.addWidget(table_label)
+        tables_row = QWidget()
+        tables_row_layout = QHBoxLayout(tables_row)
+        tables_row_layout.setContentsMargins(0, 0, 0, 0)
+        tables_row_layout.setSpacing(8)
+
+        original_table_card = self._make_card()
+        original_table_layout = QVBoxLayout(original_table_card)
+        original_table_layout.setContentsMargins(8, 8, 8, 8)
+        original_table_label = QLabel("Loaded data preview (first 10 rows)")
+        original_table_label.setObjectName("sectionTitle")
+        original_table_layout.addWidget(original_table_label)
 
         self._table_preview = QTableWidget()
         self._table_preview.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table_preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._table_preview.verticalHeader().setVisible(True)
         self._table_preview.setAlternatingRowColors(True)
-        right_layout.addWidget(self._table_preview, 2)
+        self._table_preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        original_table_layout.addWidget(self._table_preview, 1)
+        tables_row_layout.addWidget(original_table_card, 1)
 
-        self._derived_table_section = QWidget()
+        self._derived_table_section = self._make_card()
         derived_layout = QVBoxLayout(self._derived_table_section)
-        derived_layout.setContentsMargins(0, 0, 0, 0)
+        derived_layout.setContentsMargins(8, 8, 8, 8)
         derived_layout.setSpacing(6)
 
         self._derived_table_label = QLabel("New table preview (first 10 rows)")
@@ -341,6 +348,7 @@ class ExploreTab(QWidget):
         self._derived_table_preview.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self._derived_table_preview.verticalHeader().setVisible(True)
         self._derived_table_preview.setAlternatingRowColors(True)
+        self._derived_table_preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         derived_layout.addWidget(self._derived_table_preview, 1)
 
         derived_actions = QHBoxLayout()
@@ -352,29 +360,21 @@ class ExploreTab(QWidget):
         derived_layout.addLayout(derived_actions)
 
         self._derived_table_section.setVisible(False)
-        right_layout.addWidget(self._derived_table_section, 2)
+        tables_row_layout.addWidget(self._derived_table_section, 1)
+        right_layout.addWidget(tables_row, 2)
 
-        self._box_stats_section = QWidget()
-        box_stats_layout = QVBoxLayout(self._box_stats_section)
-        box_stats_layout.setContentsMargins(0, 0, 0, 0)
-        box_stats_layout.setSpacing(6)
-
-        self._box_stats_label = QLabel("Boxplot statistics")
-        self._box_stats_label.setObjectName("sectionTitle")
-        box_stats_layout.addWidget(self._box_stats_label)
-
-        self._box_stats_text = QPlainTextEdit()
-        self._box_stats_text.setReadOnly(True)
-        self._box_stats_text.setPlaceholderText("Boxplot summary appears here after generating a boxplot.")
-        self._box_stats_text.setMinimumHeight(180)
-        box_stats_layout.addWidget(self._box_stats_text, 1)
-        self._box_stats_section.setVisible(False)
-        right_layout.addWidget(self._box_stats_section, 1)
+        box_stats_actions = QHBoxLayout()
+        box_stats_actions.addStretch(1)
+        self._box_stats_button = QPushButton("Show stats / summary")
+        self._box_stats_button.setEnabled(False)
+        self._box_stats_button.clicked.connect(self._show_boxplot_statistics_window)
+        box_stats_actions.addWidget(self._box_stats_button)
+        right_layout.addLayout(box_stats_actions)
 
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setPlaceholderText("Status messages appear here.")
-        self._log.setMaximumHeight(120)
+        self._log.setMaximumHeight(84)
         right_layout.addWidget(self._log)
 
         splitter.addWidget(right_widget)
@@ -438,7 +438,8 @@ class ExploreTab(QWidget):
         self._add_contours_button.setEnabled(False)
         self._export_plot_button.setEnabled(False)
         self._export_data_button.setEnabled(False)
-        self._box_stats_text.clear()
+        self._box_stats_summary_text = None
+        self._box_stats_button.setEnabled(False)
         self._plot_data_subset = None
         self._derived_base_table = None
         self._derived_table = None
@@ -459,8 +460,6 @@ class ExploreTab(QWidget):
         self._dataset_row.setVisible(False)
         self._dataset_combo.setCurrentText("Original data")
         self._dataset_combo.setEnabled(False)
-        self._box_stats_text.clear()
-        self._box_stats_section.setVisible(False)
         self._update_scatter_fit_controls_visibility()
         self._log_message(f"Loaded table from {source}")
 
@@ -828,11 +827,12 @@ class ExploreTab(QWidget):
         self._box_controls.setVisible(plot_type == "boxplot")
         self._pairplot_controls.setVisible(plot_type == "pairplot")
         self._hexbin_controls.setVisible(plot_type == "hexbin")
+        self._box_stats_button.setVisible(is_boxplot)
+        self._box_stats_button.setEnabled(is_boxplot and self._box_stats_summary_text is not None)
         self._add_contours_button.setVisible(is_scatter)
         self._add_fit_button.setVisible(is_scatter)
         self._add_contours_button.setEnabled(is_scatter and self._last_scatter_xy is not None)
         self._add_fit_button.setEnabled(is_scatter and self._last_scatter_xy is not None)
-        self._box_stats_section.setVisible(is_boxplot and bool(self._box_stats_text.toPlainText().strip()))
         self._update_scatter_fit_controls_visibility()
 
     def _generate_plot(self) -> None:
@@ -933,8 +933,8 @@ class ExploreTab(QWidget):
                 color="#1f77b4",
             )
 
-        self._box_stats_text.clear()
-        self._box_stats_section.setVisible(False)
+        self._box_stats_summary_text = None
+        self._box_stats_button.setEnabled(False)
         self._log_message(f"Generated scatter plot with x={x_column}, y={y_column}, hue={hue_column}")
 
     def _plot_histogram(self) -> None:
@@ -960,8 +960,8 @@ class ExploreTab(QWidget):
 
         self._last_scatter_xy = None
         self._last_scatter_columns = None
-        self._box_stats_text.clear()
-        self._box_stats_section.setVisible(False)
+        self._box_stats_summary_text = None
+        self._box_stats_button.setEnabled(False)
         self._add_fit_button.setEnabled(False)
         self._add_contours_button.setEnabled(False)
         self._log_message(f"Generated histogram for {value_column}")
@@ -991,15 +991,19 @@ class ExploreTab(QWidget):
         colors = self._categorical_colors(len(groups))
 
         self._reset_axis(title=f"Boxplot: {value_column} by {category_column}", x_label=category_column, y_label=value_column)
-        boxplot = self._axis.boxplot(
-            groups,
-            labels=labels,
-            patch_artist=True,
-            medianprops={"color": "#111827", "linewidth": 1.6},
-            whiskerprops={"color": "#334155", "linewidth": 1.1},
-            capprops={"color": "#334155", "linewidth": 1.1},
-            boxprops={"edgecolor": "#334155", "linewidth": 1.1},
-        )
+        boxplot_kwargs = {
+            "patch_artist": True,
+            "medianprops": {"color": "#111827", "linewidth": 1.6},
+            "whiskerprops": {"color": "#334155", "linewidth": 1.1},
+            "capprops": {"color": "#334155", "linewidth": 1.1},
+            "boxprops": {"edgecolor": "#334155", "linewidth": 1.1},
+        }
+        try:
+            boxplot = self._axis.boxplot(groups, tick_labels=labels, **boxplot_kwargs)
+        except TypeError as exc:
+            if "tick_labels" not in str(exc):
+                raise
+            boxplot = self._axis.boxplot(groups, labels=labels, **boxplot_kwargs)
         for patch, color in zip(boxplot["boxes"], colors, strict=False):
             patch.set_facecolor(color)
             patch.set_alpha(0.82)
@@ -1007,8 +1011,8 @@ class ExploreTab(QWidget):
         self._axis.tick_params(axis="x", rotation=25)
         self._last_scatter_xy = None
         self._last_scatter_columns = None
-        self._box_stats_text.setPlainText(self._boxplot_statistics_text(frame, category_column, value_column))
-        self._box_stats_section.setVisible(True)
+        self._box_stats_summary_text = self._boxplot_statistics_text(frame, category_column, value_column)
+        self._box_stats_button.setEnabled(True)
         self._add_fit_button.setEnabled(False)
         self._add_contours_button.setEnabled(False)
         self._log_message(f"Generated boxplot for value={value_column} grouped by {category_column}")
@@ -1137,6 +1141,28 @@ class ExploreTab(QWidget):
 
         return "\n".join(lines)
 
+    def _show_boxplot_statistics_window(self) -> None:
+        """Open a popup containing the latest boxplot summary statistics."""
+        if self._box_stats_summary_text is None:
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Boxplot Statistics / Summary")
+        dialog.resize(860, 640)
+        dialog.setModal(False)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        stats_text = QPlainTextEdit(dialog)
+        stats_text.setReadOnly(True)
+        stats_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        stats_text.setPlainText(self._box_stats_summary_text)
+        layout.addWidget(stats_text, 1)
+
+        dialog.show()
+
     def _boxplot_statistics_text(self, frame: pd.DataFrame, category_column: str, value_column: str) -> str:
         """Build grouped descriptive statistics for the current boxplot data."""
         lines = [
@@ -1150,6 +1176,13 @@ class ExploreTab(QWidget):
             if values.size == 0:
                 continue
             quantiles = np.quantile(values, [0.05, 0.25, 0.50, 0.75, 0.95])
+            q1 = float(quantiles[1])
+            q3 = float(quantiles[3])
+            iqr = q3 - q1
+            lower_fence = q1 - 1.5 * iqr
+            upper_fence = q3 + 1.5 * iqr
+            outliers = values[(values < lower_fence) | (values > upper_fence)]
+            outlier_text = ", ".join(f"{float(entry):.6g}" for entry in outliers) if outliers.size else "None"
             lines.extend(
                 [
                     f"Group: {group_name}",
@@ -1159,11 +1192,12 @@ class ExploreTab(QWidget):
                     f"  std = {float(np.std(values, ddof=1)):.6g}" if values.size > 1 else "  std = NA",
                     f"  min = {float(np.min(values)):.6g}",
                     f"  q05 = {float(quantiles[0]):.6g}",
-                    f"  q25 = {float(quantiles[1]):.6g}",
+                    f"  q25 = {q1:.6g}",
                     f"  q50 = {float(quantiles[2]):.6g}",
-                    f"  q75 = {float(quantiles[3]):.6g}",
+                    f"  q75 = {q3:.6g}",
                     f"  q95 = {float(quantiles[4]):.6g}",
                     f"  max = {float(np.max(values)):.6g}",
+                    f"  outliers = {outlier_text}",
                     "",
                 ]
             )
@@ -1570,7 +1604,7 @@ class ExploreTab(QWidget):
         hexbin = self._axis.hexbin(
             x_values,
             y_values,
-            gridsize=35,
+            gridsize=self._hexbin_gridsize(x_values, y_values),
             cmap="viridis",
             mincnt=1,
             linewidths=0.2,
@@ -1580,11 +1614,32 @@ class ExploreTab(QWidget):
 
         self._last_scatter_xy = None
         self._last_scatter_columns = None
-        self._box_stats_text.clear()
-        self._box_stats_section.setVisible(False)
+        self._box_stats_summary_text = None
+        self._box_stats_button.setEnabled(False)
         self._add_fit_button.setEnabled(False)
         self._add_contours_button.setEnabled(False)
         self._log_message(f"Generated hexbin plot with x={x_column}, y={y_column}")
+
+    def _hexbin_gridsize(self, x_values: np.ndarray, y_values: np.ndarray) -> int | tuple[int, int]:
+        """Choose a data-aware hexbin grid size.
+
+        The default scales with the number of valid points so sparse datasets use
+        larger bins, while denser datasets retain more detail. A mild aspect-ratio
+        adjustment keeps the grid from looking overly stretched when the data span
+        is much wider in one dimension than the other.
+        """
+        point_count = int(min(x_values.size, y_values.size))
+        base = int(np.clip(np.ceil(np.sqrt(max(point_count, 1) / 3.0)), 8, 60))
+
+        x_span = float(np.ptp(x_values))
+        y_span = float(np.ptp(y_values))
+        if x_span <= 0.0 or y_span <= 0.0:
+            return base
+
+        aspect_factor = float(np.clip(np.sqrt(y_span / x_span), 0.75, 1.5))
+        x_gridsize = int(np.clip(round(base / aspect_factor), 8, 60))
+        y_gridsize = int(np.clip(round(base * aspect_factor), 8, 60))
+        return x_gridsize, y_gridsize
 
     def _apply_publication_style(self) -> None:
         self._figure.set_facecolor("#ffffff")
@@ -1640,8 +1695,8 @@ class ExploreTab(QWidget):
 
         self._last_scatter_xy = None
         self._last_scatter_columns = None
-        self._box_stats_text.clear()
-        self._box_stats_section.setVisible(False)
+        self._box_stats_summary_text = None
+        self._box_stats_button.setEnabled(False)
         self._add_contours_button.setEnabled(False)
         self._add_fit_button.setEnabled(False)
         self._export_plot_button.setEnabled(False)

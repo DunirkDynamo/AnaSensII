@@ -317,7 +317,7 @@ class AnaSensWindow(QMainWindow):
             "--baseline-moving-average-forward"
             if request.baseline_moving_average_forward
             else "--no-baseline-moving-average-forward",
-            "--pairplot" if request.pairplot else "--no-pairplot",
+            "--no-pairplot",
             "--drift-2d" if request.drift_2d else "--no-drift-2d",
             "--drift-1d" if request.drift_1d else "--no-drift-1d",
             "--overlay-scans" if request.overlay_scans else "--no-overlay-scans",

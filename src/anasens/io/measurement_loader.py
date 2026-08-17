@@ -39,8 +39,8 @@ class FilenameQualifierParser:
     layouts that encode metadata in file names.
 
     Example:
-        A filename like ``2025-01-01_Q1-Control-36s_RAW.csv`` can be parsed into
-        a qualifier dictionary containing ``Date``, ``Q1``, ``Label``, and
+           A filename like ``2025-01-01_batch-Control-36s_RAW.csv`` can be parsed into
+           a qualifier dictionary containing ``Date``, ``Label``, and
         ``Timestamp``.
     """
 
@@ -57,12 +57,13 @@ class FilenameQualifierParser:
         # Split the filename into legacy date and qualifier segments.
         parts = file_name.split("_")
         if len(parts) < 2:
-            return {"Date": "", "Q1": "", "Label": "", "Timestamp": 0.0}
+            return {"Date": "", "Label": "", "Timestamp": 0.0}
 
-        # Parse the expected qualifier segment ``Q1-Label-Time``.
+        # Parse the expected qualifier segment ``legacy-tag-Label-Time`` and keep only
+        # the label and timestamp fields still used by the native pipeline.
         subparts = parts[1].split("-")
         if len(subparts) < 3:
-            return {"Date": parts[0], "Q1": "", "Label": "", "Timestamp": 0.0}
+            return {"Date": parts[0], "Label": "", "Timestamp": 0.0}
 
         timestamp_text = subparts[2]
         if timestamp_text.endswith("s"):
@@ -75,7 +76,6 @@ class FilenameQualifierParser:
 
         return {
             "Date": parts[0],
-            "Q1": subparts[0],
             "Label": subparts[1],
             "Timestamp": timestamp_value,
         }
@@ -394,7 +394,6 @@ class SessionMeasurementLoader:
             scan_order = measurement_order * 1000 + curve_index
             qualifiers = {
                 "Date": date_text,
-                "Q1": "",
                 "Label": label,
                 "Timestamp": float(scan_order),
                 "SourceTime": time_text,

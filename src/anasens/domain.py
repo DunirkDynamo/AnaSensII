@@ -73,7 +73,7 @@ class SweepData:
         qualifiers: Free-form metadata dict.  For JSON/pssession sources
             this includes ``MeasurementTitle``, ``Date``, ``SourceTime``,
             ``MeasurementIndex``, ``CurveIndex``, and ``ScanOrder``.
-            For legacy CSV sources it contains ``Date``, ``Q1``,
+                For legacy CSV sources it contains ``Date``,
             ``Label``, and ``Timestamp``.
         extracted_peak_parameters: Dict of numpy arrays produced by
             :func:`~anasens.features.peaks.find_peaks_with_widths`

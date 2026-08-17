@@ -66,7 +66,6 @@ class PipelineRunRequest:
         baseline_moving_average_window_size: MA rolling window.
         baseline_moving_average_forward: MA direction flag.
         baseline_moving_average_max_iter: MA convergence cap.
-        pairplot: Render seaborn pairplot.
         drift_2d: Render 2-D drift scatter.
         drift_1d: Render 1-D drift line plot.
         overlay_scans: Render scan overlay with peak markers.
@@ -86,7 +85,6 @@ class PipelineRunRequest:
     baseline_moving_average_window_size: int
     baseline_moving_average_forward: bool
     baseline_moving_average_max_iter: int
-    pairplot: bool
     drift_2d: bool
     drift_1d: bool
     overlay_scans: bool
@@ -343,17 +341,14 @@ class PipelineTab(QWidget):
         viz_title.setObjectName("sectionTitle")
         viz_layout.addWidget(viz_title)
 
-        self.pairplot_check = QCheckBox("Pairplot of extracted parameters")
         self.drift_2d_check = QCheckBox("2D peak-coordinate drift")
         self.drift_1d_check = QCheckBox("1D peak-coordinate drift")
         self.overlay_check = QCheckBox("Overlay tagged sweeps")
         self.preprocessing_overview_check = QCheckBox("Preprocessing overview (raw / smoothed / baseline)")
-        self.pairplot_check.setChecked(True)
         self.drift_2d_check.setChecked(True)
         self.drift_1d_check.setChecked(True)
         self.overlay_check.setChecked(True)
         self.preprocessing_overview_check.setChecked(True)
-        viz_layout.addWidget(self.pairplot_check)
         viz_layout.addWidget(self.drift_2d_check)
         viz_layout.addWidget(self.drift_1d_check)
         viz_layout.addWidget(self.overlay_check)
@@ -405,7 +400,6 @@ class PipelineTab(QWidget):
             baseline_moving_average_window_size=self._preprocess_settings.baseline_moving_average_window_size,
             baseline_moving_average_forward=self._preprocess_settings.baseline_moving_average_forward,
             baseline_moving_average_max_iter=self._preprocess_settings.baseline_moving_average_max_iter,
-            pairplot=self.pairplot_check.isChecked(),
             drift_2d=self.drift_2d_check.isChecked(),
             drift_1d=self.drift_1d_check.isChecked(),
             overlay_scans=self.overlay_check.isChecked(),
@@ -459,7 +453,6 @@ class PipelineTab(QWidget):
         self._preprocess_settings = PreprocessSettings()
         self._refresh_preprocess_summary()
         self._refresh_input_path_hint()
-        self.pairplot_check.setChecked(True)
         self.drift_2d_check.setChecked(True)
         self.drift_1d_check.setChecked(True)
         self.overlay_check.setChecked(True)

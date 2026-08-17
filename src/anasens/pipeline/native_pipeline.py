@@ -430,7 +430,6 @@ class NativeAnalysisPipeline:
             "MeasurementName": [],
             "SweepName": [],
             "Date": [],
-            "Q1": [],
             "SourceTime": [],
             "MeasurementIndex": [],
             "CurveIndex": [],
@@ -451,7 +450,6 @@ class NativeAnalysisPipeline:
             metadata_columns["MeasurementName"].extend([measurement.measurement_name] * row_count)
             metadata_columns["SweepName"].extend([sweep.file_name] * row_count)
             metadata_columns["Date"].extend([str(qualifiers.get("Date", ""))] * row_count)
-            metadata_columns["Q1"].extend([str(qualifiers.get("Q1", ""))] * row_count)
             metadata_columns["SourceTime"].extend([str(qualifiers.get("SourceTime", ""))] * row_count)
             metadata_columns["MeasurementIndex"].extend([int(qualifiers.get("MeasurementIndex", 0))] * row_count)
             metadata_columns["CurveIndex"].extend([int(qualifiers.get("CurveIndex", 0))] * row_count)

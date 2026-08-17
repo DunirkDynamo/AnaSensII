@@ -172,7 +172,7 @@ class InverseEstimationTab(QWidget):
         self._export_modified_table_button = QPushButton("Export Modified Table")
         self._export_modified_table_button.setEnabled(False)
         self._export_modified_table_button.clicked.connect(self._export_modified_table)
-        modified_table_layout.addWidget(self._export_modified_table_button, 0, 0)
+        modified_table_layout.addWidget(self._export_modified_table_button)
 
         self._modified_table_section.setVisible(False)
         layout.addWidget(self._modified_table_section, 1)
