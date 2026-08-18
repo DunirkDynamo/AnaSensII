@@ -86,12 +86,12 @@ class InverseEstimationTab(QWidget):
         table_button.clicked.connect(self._browse_data_table)
         inputs_layout.addWidget(table_button, 1, 2)
 
-        inputs_layout.addWidget(QLabel("Table column"), 2, 0)
+        inputs_layout.addWidget(QLabel("Table metric column"), 2, 0)
         self.table_metric_combo = QComboBox(self)
         self.table_metric_combo.setEnabled(False)
         inputs_layout.addWidget(self.table_metric_combo, 2, 1, 1, 2)
 
-        inputs_layout.addWidget(QLabel("Metric column"), 3, 0)
+        inputs_layout.addWidget(QLabel("Measurement metric column"), 3, 0)
         self.metric_combo = QComboBox(self)
         self.metric_combo.setEnabled(False)
         inputs_layout.addWidget(self.metric_combo, 3, 1, 1, 2)
